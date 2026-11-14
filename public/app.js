@@ -60,14 +60,24 @@ let lastSpokenLanguage = 'en';
 
 let isMicListening = false;
 let speechRecognition = null;
+let isRecognitionRunning = false;
 let micMediaStream = null;
+let micAnalyser = null;
+let micResultStartIndex = 0;
+let awaitingNextMicUtterance = false;
+let micAutoResumeTimer = null;
 
 // Rolling Mid-Sentence Word Stream State
 let streamSessionId = 0;
 let activeStreamTimer = null;
-let wordRegistry = []; // [{ word, timestamp, checkedAtCheckIndex, status }]
+let wordRegistry = []; // [{ word, timestamp, isCheckpoint }]
 let rollingCheckCount = 0;
 let isInterruptedCurrentStream = false;
+
+// Single-flight coalescing state so interim speech events never clog browser HTTP connections
+let inFlightEvalCount = 0;
+let queuedEvalParams = null;
+let interimDebounceTimer = null;
 
 function ensureAudioContext() {
   if (!audioCtx) {
@@ -80,58 +90,68 @@ function ensureAudioContext() {
   return audioCtx;
 }
 
-// Pre-load and cache browser voices so we can pick an authentic Arabic / Emirati voice
-let availableBrowserVoices = [];
-function refreshBrowserVoices() {
-  if ('speechSynthesis' in window) {
-    availableBrowserVoices = window.speechSynthesis.getVoices() || [];
+/**
+ * Safely starts Web Speech API recognition if Live Mic mode is active and Edge isn't currently speaking.
+ */
+function safeStartSpeechRecognition() {
+  if (!isMicListening || !speechRecognition || isRecognitionRunning) return;
+  try {
+    speechRecognition.start();
+  } catch (e) {
+    // Ignore InvalidStateError if already started
   }
-}
-if ('speechSynthesis' in window) {
-  refreshBrowserVoices();
-  window.speechSynthesis.onvoiceschanged = refreshBrowserVoices;
 }
 
 /**
- * Selects the best Arabic / Emirati (or deep Middle-Eastern / Multilingual) voice installed on the system,
- * strictly avoiding British female voices (like Microsoft Hazel / Libby / Sonia / Google UK English Female).
+ * Automatically resumes Live Mic listening as soon as Edge finishes speaking a cut-in correction,
+ * so the user can immediately speak their next sentence without toggling the mic button off and on.
  */
-function pickBestEmiratiVoice(language = 'en') {
-  if (!availableBrowserVoices.length) refreshBrowserVoices();
-  const voices = availableBrowserVoices;
-  if (!voices.length) return null;
-
-  // 1. If speaking Hindi, prefer Hindi voice
-  if (language === 'hi') {
-    const hiVoice = voices.find((v) => /^hi(-|_|$)/i.test(v.lang));
-    if (hiVoice) return hiVoice;
+function resumeLiveMicAfterEdgeSpeaks() {
+  if (micAutoResumeTimer) {
+    clearTimeout(micAutoResumeTimer);
+    micAutoResumeTimer = null;
   }
 
-  // 2. Prefer UAE Arabic (ar-AE) or Gulf/Arabic voices (Hamdan, Fatima, Hamed, Naayf, Majed, Zariyah, Salma, Tarik, Maged)
-  const emiratiOrArabicMatch = voices.find(
-    (v) =>
-      /ar-AE|ar_AE/i.test(v.lang) ||
-      /hamdan|fatima|hamed|naayf|majed|maged|tarik|zariyah|salma|laila|amira|arabic/i.test(v.name)
-  );
-  if (emiratiOrArabicMatch) return emiratiOrArabicMatch;
+  if (isMicListening) {
+    isInterruptedCurrentStream = false;
+    awaitingNextMicUtterance = true;
+    if (micAnalyser) {
+      mascot.connectAnalyser(micAnalyser);
+    } else {
+      mascot.connectAnalyser(null);
+    }
+    mascot.setState('LISTENING');
+    streamActiveDot.classList.add('active');
+    updateMascotStateUI(
+      'LISTENING',
+      'LIVE MIC ACTIVE • SPEAK NEXT SENTENCE (AUTO-LISTENING)'
+    );
+    safeStartSpeechRecognition();
+  } else {
+    mascot.connectAnalyser(null);
+    mascot.setState('IDLE');
+    updateMascotStateUI('IDLE', 'PASSIVE GUARDIAN • LISTENING EVERY 2–3 WORDS');
+  }
+}
 
-  const anyArabicLang = voices.find((v) => /^ar(-|_|$)/i.test(v.lang));
-  if (anyArabicLang) return anyArabicLang;
-
-  // 3. Prefer warm Multilingual / Natural male voices (Andrew, Brian, Guy, Davis, Christopher, Ryan,Prabhat)
-  // and explicitly exclude British female voices ("Hazel", "Libby", "Sonia", "UK English Female", "Susan")
-  const nonBritishFemale = voices.filter(
-    (v) => !/hazel|libby|sonia|susan|uk english female|kate|serena/i.test(v.name)
-  );
-
-  const preferredWarmVoice = nonBritishFemale.find((v) =>
-    /multilingual|andrew|brian|guy|davis|christopher|roger|steffan|prabhat|daniel|alex/i.test(
-      v.name
-    )
-  );
-  if (preferredWarmVoice) return preferredWarmVoice;
-
-  return nonBritishFemale[0] || voices[0];
+/**
+ * Plays the instant 24K golden acoustic cut-in chime at t=0ms and returns the exact performance.now() timestamp.
+ */
+function playCutInChimeNow() {
+  const ctx = ensureAudioContext();
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = 'triangle';
+  osc.frequency.setValueAtTime(528, ctx.currentTime);
+  osc.frequency.exponentialRampToValueAtTime(792, ctx.currentTime + 0.11);
+  gain.gain.setValueAtTime(0.14, ctx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15);
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+  const firstSoundTime = performance.now();
+  osc.start();
+  osc.stop(ctx.currentTime + 0.16);
+  return firstSoundTime;
 }
 
 async function decodeAndPlayWavBase64(audioBase64) {
@@ -170,27 +190,20 @@ async function decodeAndPlayWavBase64(audioBase64) {
   currentAudioSource = source;
 
   source.onended = () => {
-    mascot.connectAnalyser(null);
     currentAudioSource = null;
     if (mascot.state === 'INTERRUPT_SPEAKING') {
-      mascot.setState(isMicListening ? 'LISTENING' : 'IDLE');
-      updateMascotStateUI(
-        isMicListening ? 'LISTENING' : 'IDLE',
-        isMicListening
-          ? 'LIVE MIC ACTIVE • RE-CHECKING EVERY WORD MID-SENTENCE'
-          : 'PASSIVE GUARDIAN • LISTENING EVERY 2–3 WORDS'
-      );
+      resumeLiveMicAfterEdgeSpeaks();
     }
   };
   return startMoment;
 }
 
 /**
- * Plays an instant 24K golden acoustic cut-in chime at t=0ms (locking the exact Wrong-Word-to-First-Sound latency)
- * and plays Edge's voice using Gemini 3 TTS (Emirati "Orus" voice) or the best Arabic/Emirati system voice.
+ * Plays Edge's witty voice using the exact Iteration 1 Gemini TTS ('Puck') audio from the server.
+ * Only falls back to browser speechSynthesis if no API key is configured on the server.
  */
-async function playEdgeCutInVoice({ correction, audioBase64, language = 'en' }) {
-  const ctx = ensureAudioContext();
+async function playEdgeCutInVoice({ correction, audioBase64, language = 'en', skipChime = false }) {
+  ensureAudioContext();
 
   // Stop any previous audio or speech synthesis
   if (currentAudioSource) {
@@ -204,16 +217,22 @@ async function playEdgeCutInVoice({ correction, audioBase64, language = 'en' }) 
   if ('speechSynthesis' in window) {
     window.speechSynthesis.cancel();
   }
+  if (micAutoResumeTimer) {
+    clearTimeout(micAutoResumeTimer);
+    micAutoResumeTimer = null;
+  }
 
   lastSpokenCorrection = correction;
-  lastSpokenAudioBase64 = audioBase64;
+  if (audioBase64) {
+    lastSpokenAudioBase64 = audioBase64;
+  }
   lastSpokenLanguage = language;
   replayVoiceBtn.disabled = false;
 
   mascot.setState('INTERRUPT_SPEAKING');
   updateMascotStateUI('INTERRUPT_SPEAKING', 'EDGE CUTTING IN OUT LOUD • DUBAI FACT GUARDIAN');
 
-  // 1. If Gemini 3 TTS WAV audio is already cached/present in the response, play it immediately!
+  // 1. If Gemini 3 TTS ('Puck') WAV audio is already cached/present, play it immediately!
   if (audioBase64) {
     try {
       return await decodeAndPlayWavBase64(audioBase64);
@@ -222,92 +241,53 @@ async function playEdgeCutInVoice({ correction, audioBase64, language = 'en' }) 
     }
   }
 
-  // 2. Fire instant acoustic cut-in signature at t=0ms so the user hears Edge cut them off immediately!
-  const osc = ctx.createOscillator();
-  const gain = ctx.createGain();
-  osc.type = 'triangle';
-  osc.frequency.setValueAtTime(528, ctx.currentTime);
-  osc.frequency.exponentialRampToValueAtTime(792, ctx.currentTime + 0.11);
-  gain.gain.setValueAtTime(0.15, ctx.currentTime);
-  gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15);
-  osc.connect(gain);
-  gain.connect(ctx.destination);
-  const firstSoundTime = performance.now();
-  osc.start();
-  osc.stop(ctx.currentTime + 0.16);
+  // 2. Play cut-in chime at t=0ms (if not already played) while awaiting the in-flight Gemini TTS ('Puck') audio
+  const firstSoundTime = skipChime ? performance.now() : playCutInChimeNow();
 
-  // 3. Request studio-grade Gemini 3 TTS (Emirati-styled "Orus" voice) from /api/tts in parallel;
-  // if the server has a Gemini API key and returns WAV audio quickly, play that; otherwise speak via Arabic/Emirati voice!
-  let ttsPlayed = false;
-  const ttsPromise = fetch('/api/tts', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text: correction, language })
-  })
-    .then((r) => (r.ok ? r.json() : null))
-    .catch(() => null);
-
-  // Wait up to 420ms to see if live Gemini 3 TTS returns studio audio; if not, start local Emirati/Arabic voice immediately
-  const raceResult = await Promise.race([
-    ttsPromise,
-    new Promise((resolve) => setTimeout(() => resolve('TIMEOUT'), 420))
-  ]);
-
-  if (raceResult && raceResult !== 'TIMEOUT' && raceResult.audioBase64) {
-    try {
-      ttsPlayed = true;
-      lastSpokenAudioBase64 = raceResult.audioBase64;
-      await decodeAndPlayWavBase64(raceResult.audioBase64);
-      return firstSoundTime;
-    } catch (e) {
-      ttsPlayed = false;
-    }
-  } else {
-    // Also cache the TTS audio when it finishes in the background so future replays use Gemini 3 TTS!
-    ttsPromise.then((res) => {
-      if (res && res.audioBase64) {
-        lastSpokenAudioBase64 = res.audioBase64;
-      }
+  // 3. Await the server's in-flight Gemini TTS ('Puck') synthesis so we always get the authentic Iteration 1 voice!
+  try {
+    const ttsRes = await fetch('/api/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: correction, language })
     });
+    if (ttsRes.ok) {
+      const ttsData = await ttsRes.json();
+      if (ttsData && ttsData.audioBase64) {
+        lastSpokenAudioBase64 = ttsData.audioBase64;
+        await decodeAndPlayWavBase64(ttsData.audioBase64);
+        return firstSoundTime;
+      }
+    }
+  } catch (ttsErr) {
+    console.warn('[Edge /api/tts fetch error]:', ttsErr);
   }
 
-  if (!ttsPlayed && 'speechSynthesis' in window && correction) {
+  // 4. Fallback ONLY when no Gemini API key is configured on the server (or offline)
+  if ('speechSynthesis' in window && correction) {
     const utter = new SpeechSynthesisUtterance(correction);
-    const chosenVoice = pickBestEmiratiVoice(language);
-    if (chosenVoice) {
-      utter.voice = chosenVoice;
-      utter.lang = chosenVoice.lang;
-    } else {
-      utter.lang = language === 'ar' ? 'ar-AE' : language === 'hi' ? 'hi-IN' : 'ar-AE';
-    }
-    utter.rate = 1.03;
-    utter.pitch = 0.96;
+    utter.lang = language === 'ar' ? 'ar-AE' : language === 'hi' ? 'hi-IN' : 'en-US';
+    utter.rate = 1.05;
+    utter.pitch = 1.02;
 
     utter.onend = () => {
       if (mascot.state === 'INTERRUPT_SPEAKING') {
-        mascot.setState(isMicListening ? 'LISTENING' : 'IDLE');
-        updateMascotStateUI(
-          isMicListening ? 'LISTENING' : 'IDLE',
-          isMicListening
-            ? 'LIVE MIC ACTIVE • RE-CHECKING EVERY WORD MID-SENTENCE'
-            : 'PASSIVE GUARDIAN • LISTENING EVERY 2–3 WORDS'
-        );
+        resumeLiveMicAfterEdgeSpeaks();
+      }
+    };
+    utter.onerror = () => {
+      if (mascot.state === 'INTERRUPT_SPEAKING') {
+        resumeLiveMicAfterEdgeSpeaks();
       }
     };
     window.speechSynthesis.speak(utter);
   }
 
-  // Keep visual speaking state active for natural duration of the sentence
-  const estimatedDurationMs = Math.max(2600, Math.min(6200, correction.length * 42));
-  setTimeout(() => {
+  // Safety timer to guarantee mic resumes even if speechSynthesis onend doesn't fire
+  const estimatedDurationMs = Math.max(2800, Math.min(6800, correction.length * 48));
+  micAutoResumeTimer = setTimeout(() => {
     if (mascot.state === 'INTERRUPT_SPEAKING' && !currentAudioSource) {
-      mascot.setState(isMicListening ? 'LISTENING' : 'IDLE');
-      updateMascotStateUI(
-        isMicListening ? 'LISTENING' : 'IDLE',
-        isMicListening
-          ? 'LIVE MIC ACTIVE • RE-CHECKING EVERY WORD MID-SENTENCE'
-          : 'PASSIVE GUARDIAN • LISTENING EVERY 2–3 WORDS'
-      );
+      resumeLiveMicAfterEdgeSpeaks();
     }
   }, estimatedDurationMs);
 
@@ -504,15 +484,27 @@ function escapeHtml(str = '') {
 
 /**
  * Evaluates the current rolling word buffer against /api/evaluate.
- * Called on EVERY new word (once >=3 words are spoken) while the user is STILL speaking!
- * Notice includeAudio is false so the Judge verdict returns in <50ms without waiting for TTS audio synthesis.
+ * Uses coalescing concurrency control so rapid interim mic events never clog browser HTTP connections,
+ * and triggers the UI + acoustic cut-in at t=0ms while streaming Iteration 1 Gemini TTS ('Puck') voice.
  */
-async function evaluateRollingWindow({ sessionId, isFinalSentence = false, remainingWords = [] }) {
+async function evaluateRollingWindow({
+  sessionId,
+  isFinalSentence = false,
+  remainingWords = []
+}) {
   if (sessionId !== streamSessionId || isInterruptedCurrentStream) return null;
 
   const spokenTextSoFar = wordRegistry.map((w) => w.word).join(' ');
   if (!spokenTextSoFar.trim()) return null;
 
+  // Prevent browser 6-connection pool starvation during rapid live mic speech:
+  // allow at most 2 concurrent in-flight evaluations and coalesce intermediate snapshots into queuedEvalParams
+  if (inFlightEvalCount >= 2 && !isFinalSentence) {
+    queuedEvalParams = { sessionId, isFinalSentence, remainingWords };
+    return null;
+  }
+
+  inFlightEvalCount += 1;
   rollingCheckCount += 1;
   wordCheckCounter.textContent = `Checks: ${rollingCheckCount} • Words: ${wordRegistry.length}`;
 
@@ -536,6 +528,11 @@ async function evaluateRollingWindow({ sessionId, isFinalSentence = false, remai
 
     if (result.verdict === 'INTERRUPT') {
       isInterruptedCurrentStream = true;
+      queuedEvalParams = null;
+      if (interimDebounceTimer) {
+        clearTimeout(interimDebounceTimer);
+        interimDebounceTimer = null;
+      }
 
       // Immediately halt any ongoing simulated word stream or live mic recognition!
       if (activeStreamTimer) {
@@ -551,27 +548,33 @@ async function evaluateRollingWindow({ sessionId, isFinalSentence = false, remai
       }
       streamActiveDot.classList.remove('active');
 
-      // Highlight the exact wrong word and show the remaining words that got cut off mid-sentence
+      // 1. Highlight the exact wrong word and show the remaining words that got cut off mid-sentence
       renderTokenizedStream(result.wrongTriggerWord, remainingWords);
 
+      // 2. Fire the golden acoustic cut-in chime at t=0ms and lock the latency stopwatch IMMEDIATELY!
       const wrongWordTime = findWrongWordTimestamp(result.wrongTriggerWord);
-      const firstSoundTime = await playEdgeCutInVoice({
-        correction: result.correction,
-        audioBase64: result.audioBase64 || null,
-        language: result.languageDetected || 'en'
-      });
-
+      const firstSoundTime = playCutInChimeNow();
       const wrongWordToFirstSoundMs = Math.max(
         8,
         Math.round(firstSoundTime - wrongWordTime)
       );
 
+      // 3. Update the Verdict Stage, Spoken Quote, and Stopwatch HUD at t=0ms BEFORE waiting for TTS audio!
       updateVerdictAndTelemetry({
         result,
         spokenTextSoFar,
         wrongWordToFirstSoundMs,
         isFinalSentence: true
       });
+
+      // 4. Play Edge's Iteration 1 Gemini TTS ('Puck') voice (and auto-resume mic when finished)
+      await playEdgeCutInVoice({
+        correction: result.correction,
+        audioBase64: result.audioBase64 || null,
+        language: result.languageDetected || 'en',
+        skipChime: true
+      });
+
       return result;
     }
 
@@ -588,6 +591,17 @@ async function evaluateRollingWindow({ sessionId, isFinalSentence = false, remai
   } catch (err) {
     console.error('[Edge Rolling Evaluation Error]:', err);
     return null;
+  } finally {
+    inFlightEvalCount = Math.max(0, inFlightEvalCount - 1);
+    if (
+      queuedEvalParams &&
+      !isInterruptedCurrentStream &&
+      queuedEvalParams.sessionId === streamSessionId
+    ) {
+      const nextCall = queuedEvalParams;
+      queuedEvalParams = null;
+      evaluateRollingWindow(nextCall);
+    }
   }
 }
 
@@ -607,6 +621,11 @@ export async function streamUtteranceMidSentence(fullSentence) {
     clearInterval(activeStreamTimer);
     activeStreamTimer = null;
   }
+  if (interimDebounceTimer) {
+    clearTimeout(interimDebounceTimer);
+    interimDebounceTimer = null;
+  }
+  queuedEvalParams = null;
   streamSessionId += 1;
   const currentSession = streamSessionId;
   wordRegistry = [];
@@ -671,7 +690,7 @@ export async function streamUtteranceMidSentence(fullSentence) {
 
 /**
  * Real-Time Browser Microphone Streaming (Web Speech API interimResults + Web Audio Analyser)
- * Re-checks rolling speech on EVERY new word while the user is still speaking!
+ * Automatically resets and continues listening across unlimited back-to-back sentences!
  */
 async function toggleLiveMicrophone() {
   if (isMicListening) {
@@ -686,10 +705,10 @@ async function toggleLiveMicrophone() {
   try {
     micMediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     const micSource = audioCtx.createMediaStreamSource(micMediaStream);
-    const analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 128;
-    micSource.connect(analyser);
-    mascot.connectAnalyser(analyser);
+    micAnalyser = audioCtx.createAnalyser();
+    micAnalyser.fftSize = 128;
+    micSource.connect(micAnalyser);
+    mascot.connectAnalyser(micAnalyser);
   } catch (micErr) {
     console.warn('[Edge Mic] Audio stream analyser unavailable:', micErr.message);
   }
@@ -703,17 +722,21 @@ async function toggleLiveMicrophone() {
   isMicListening = true;
   micToggleBtn.setAttribute('aria-pressed', 'true');
   micBtnTitle.textContent = 'Listening Live (Click to Stop)';
-  micBtnSub.textContent = 'Edge checks every word mid-sentence';
+  micBtnSub.textContent = 'Auto-continues across sentences';
   streamActiveDot.classList.add('active');
   mascot.setState('LISTENING');
   updateMascotStateUI('LISTENING', 'LIVE MIC ACTIVE • RE-CHECKING EVERY WORD MID-SENTENCE');
 
   streamSessionId += 1;
-  const currentSession = streamSessionId;
   wordRegistry = [];
   rollingCheckCount = 0;
   isInterruptedCurrentStream = false;
+  awaitingNextMicUtterance = false;
+  micResultStartIndex = 0;
+  queuedEvalParams = null;
+
   let lastCheckedTranscript = '';
+  let lastCheckedWordCount = 0;
 
   speechRecognition = new SpeechRecognitionClass();
   speechRecognition.continuous = true;
@@ -721,12 +744,18 @@ async function toggleLiveMicrophone() {
   speechRecognition.maxAlternatives = 1;
   speechRecognition.lang = 'en-US';
 
+  speechRecognition.onstart = () => {
+    isRecognitionRunning = true;
+    micResultStartIndex = 0;
+  };
+
   speechRecognition.onresult = (event) => {
-    if (isInterruptedCurrentStream) return;
+    // Ignore microphone pickup while Edge is speaking out loud
+    if (isInterruptedCurrentStream || mascot.state === 'INTERRUPT_SPEAKING') return;
 
     let combinedTranscript = '';
     let hasFinal = false;
-    for (let i = 0; i < event.results.length; i++) {
+    for (let i = micResultStartIndex; i < event.results.length; i++) {
       combinedTranscript += event.results[i][0].transcript + ' ';
       if (event.results[i].isFinal && i === event.results.length - 1) {
         hasFinal = true;
@@ -736,6 +765,23 @@ async function toggleLiveMicrophone() {
     const cleanTranscript = combinedTranscript.trim();
     const spokenWords = cleanTranscript.split(/\s+/).filter(Boolean);
     if (spokenWords.length === 0) return;
+
+    // If the previous sentence finished (either SILENT or INTERRUPT), automatically start a clean window
+    // on the very first word of the user's new sentence!
+    if (awaitingNextMicUtterance) {
+      awaitingNextMicUtterance = false;
+      streamSessionId += 1;
+      wordRegistry = [];
+      rollingCheckCount = 0;
+      lastCheckedTranscript = '';
+      lastCheckedWordCount = 0;
+      queuedEvalParams = null;
+      streamActiveDot.classList.add('active');
+      mascot.setState('LISTENING');
+      updateMascotStateUI('LISTENING', 'LIVE MIC ACTIVE • RE-CHECKING EVERY WORD MID-SENTENCE');
+    }
+
+    const activeSession = streamSessionId;
 
     // Stamp new words with exact performance.now() arrival time
     const now = performance.now();
@@ -754,40 +800,87 @@ async function toggleLiveMicrophone() {
     wordRegistry = updatedRegistry;
     renderTokenizedStream();
 
-    // Trigger evaluation immediately on EVERY new word once >= 3 words have been spoken!
-    if ((wordRegistry.length >= 3 && cleanTranscript !== lastCheckedTranscript) || hasFinal) {
+    // If this sentence just finalized, advance micResultStartIndex so the next sentence starts fresh!
+    if (hasFinal) {
+      micResultStartIndex = event.results.length;
+      awaitingNextMicUtterance = true;
+      if (interimDebounceTimer) {
+        clearTimeout(interimDebounceTimer);
+        interimDebounceTimer = null;
+      }
       lastCheckedTranscript = cleanTranscript;
+      lastCheckedWordCount = wordRegistry.length;
       evaluateRollingWindow({
-        sessionId: currentSession,
-        isFinalSentence: hasFinal,
+        sessionId: activeSession,
+        isFinalSentence: true,
         remainingWords: []
       });
+      return;
     }
-  };
 
-  speechRecognition.onerror = () => {
-    // Keep listening unless explicitly stopped or interrupted
-  };
-
-  speechRecognition.onend = () => {
-    if (isMicListening && !isInterruptedCurrentStream) {
-      try {
-        speechRecognition.start();
-      } catch (e) {
-        // ignore
+    // Trigger mid-sentence check whenever a new word is added (once >= 3 words)
+    // OR after a 240ms pause on the current word so we don't spam 60 syllable requests!
+    if (wordRegistry.length >= 3) {
+      if (wordRegistry.length > lastCheckedWordCount) {
+        lastCheckedWordCount = wordRegistry.length;
+        lastCheckedTranscript = cleanTranscript;
+        if (interimDebounceTimer) {
+          clearTimeout(interimDebounceTimer);
+          interimDebounceTimer = null;
+        }
+        evaluateRollingWindow({
+          sessionId: activeSession,
+          isFinalSentence: false,
+          remainingWords: []
+        });
+      } else if (cleanTranscript !== lastCheckedTranscript) {
+        if (interimDebounceTimer) clearTimeout(interimDebounceTimer);
+        interimDebounceTimer = setTimeout(() => {
+          if (!isInterruptedCurrentStream && activeSession === streamSessionId) {
+            lastCheckedTranscript = cleanTranscript;
+            evaluateRollingWindow({
+              sessionId: activeSession,
+              isFinalSentence: false,
+              remainingWords: []
+            });
+          }
+        }, 240);
       }
     }
   };
 
-  try {
-    speechRecognition.start();
-  } catch (e) {
-    console.warn('[Edge SpeechRecognition start]:', e);
-  }
+  speechRecognition.onerror = () => {
+    // Keep listening unless explicitly stopped or currently speaking an interrupt
+  };
+
+  speechRecognition.onend = () => {
+    isRecognitionRunning = false;
+    if (
+      isMicListening &&
+      !isInterruptedCurrentStream &&
+      mascot.state !== 'INTERRUPT_SPEAKING'
+    ) {
+      safeStartSpeechRecognition();
+    }
+  };
+
+  safeStartSpeechRecognition();
 }
 
 function stopLiveMicrophone() {
   isMicListening = false;
+  isRecognitionRunning = false;
+  awaitingNextMicUtterance = false;
+  if (micAutoResumeTimer) {
+    clearTimeout(micAutoResumeTimer);
+    micAutoResumeTimer = null;
+  }
+  if (interimDebounceTimer) {
+    clearTimeout(interimDebounceTimer);
+    interimDebounceTimer = null;
+  }
+  queuedEvalParams = null;
+
   micToggleBtn.setAttribute('aria-pressed', 'false');
   micBtnTitle.textContent = 'Start Live Mic';
   micBtnSub.textContent = 'Continuous mid-sentence listening';
@@ -805,6 +898,7 @@ function stopLiveMicrophone() {
     micMediaStream.getTracks().forEach((t) => t.stop());
     micMediaStream = null;
   }
+  micAnalyser = null;
   mascot.connectAnalyser(null);
   mascot.setState('IDLE');
   updateMascotStateUI('IDLE', 'PASSIVE GUARDIAN • LISTENING EVERY 2–3 WORDS');

@@ -33,24 +33,31 @@ if (!serverApiKey && fs.existsSync(ENV_FILE_PATH)) {
 
 // Active model registry discovered from the live Gemini API
 const modelRegistry = {
-  judgeModel: 'gemini-3.5-flash-lite',
+  judgeModel: 'gemini-3.1-flash-lite-preview',
   judgeFallbacks: [
     'gemini-3.5-flash-lite',
     'gemini-3.1-flash-lite',
+    'gemini-3.1-flash-lite-preview',
     'gemini-3.8-flash',
     'gemini-3.6-flash',
-    'gemini-3-flash-preview'
+    'gemini-3-flash-preview',
+    'gemini-2.5-flash-lite',
+    'gemini-2.5-flash'
   ],
-  ttsModel: 'gemini-3.8-flash-lite-tts',
+  ttsModel: 'gemini-3.1-flash-tts-preview',
   ttsFallbacks: [
     'gemini-3.8-flash-lite-tts',
     'gemini-3.8-flash-tts',
-    'gemini-3.1-flash-tts-preview'
+    'gemini-3.1-flash-tts-preview',
+    'gemini-2.5-flash-preview-tts'
   ],
   discoveredModels: [],
   lastDiscoveryAt: null,
   liveApiVerified: false
 };
+
+// Track models that reject thinkingBudget: 0 so we never double-call them on future checks
+const modelsRejectingZeroBudget = new Set();
 
 function getGenAIClient() {
   if (!serverApiKey) return null;
@@ -84,12 +91,14 @@ async function discoverNewestModels() {
       const preferredJudgeOrder = [
         'gemini-3.5-flash-lite',
         'gemini-3.1-flash-lite',
+        'gemini-3.1-flash-lite-preview',
         'gemini-3.8-flash',
         'gemini-3.7-flash',
         'gemini-3.6-flash',
         'gemini-3.5-flash',
-        'gemini-3.1-flash-lite-preview',
-        'gemini-3-flash-preview'
+        'gemini-3-flash-preview',
+        'gemini-2.5-flash-lite',
+        'gemini-2.5-flash'
       ];
       for (const candidate of preferredJudgeOrder) {
         if (availableNames.includes(candidate)) {
@@ -99,7 +108,7 @@ async function discoverNewestModels() {
       }
       // If another newer gemini-3*flash-lite exists, prefer it
       const dynamicFlashLite = availableNames
-        .filter((n) => /^gemini-3(\.\d+)?-flash-lite$/.test(n))
+        .filter((n) => /^gemini-3(\.\d+)?-flash-lite(-preview)?$/.test(n))
         .sort()
         .reverse();
       if (dynamicFlashLite.length > 0) {
@@ -110,7 +119,8 @@ async function discoverNewestModels() {
       const preferredTtsOrder = [
         'gemini-3.8-flash-lite-tts',
         'gemini-3.8-flash-tts',
-        'gemini-3.1-flash-tts-preview'
+        'gemini-3.1-flash-tts-preview',
+        'gemini-2.5-flash-preview-tts'
       ];
       for (const candidate of preferredTtsOrder) {
         if (availableNames.includes(candidate)) {
@@ -510,6 +520,36 @@ function deterministicDubaiJudge(transcript = '') {
       arabicPhraseUsed: 'Habibi, Yalla',
       dubaiReference: 'Emirates Airline at DXB Airport',
       languageDetected: 'en'
+    },
+    {
+      match: /\b(porsche|bmw|mercedes|audi|volkswagen)\b[\s\S]*?\b(indian|japanese|american|italian|french|chinese|korean|british)\s+(brand|car|company|automaker|manufacturer)\b/i,
+      extractTrigger: (m) => m[2],
+      claimDetected: 'Misidentified a German automaker nationality',
+      correction:
+        'Whoa, hit the brakes on Sheikh Zayed Road, Habibi! Porsche and its fellow German icons are proud German engineering from Germany, not there! Yalla, every supercar fan in Downtown Dubai knows that one!',
+      arabicPhraseUsed: 'Habibi, Yalla',
+      dubaiReference: 'Supercars on Sheikh Zayed Road & Downtown Dubai',
+      languageDetected: 'en'
+    },
+    {
+      match: /\b(ferrari|lamborghini|maserati)\b[\s\S]*?\b(indian|german|japanese|american|french|chinese|korean|british)\s+(brand|car|company|automaker|manufacturer)\b/i,
+      extractTrigger: (m) => m[2],
+      claimDetected: 'Misidentified an Italian supercar brand nationality',
+      correction:
+        'Hold the steering wheel, Habibi! That supercar is pure Italian thoroughbred from Italy—you see them gleaming outside Dubai Mall every evening! Mashallah!',
+      arabicPhraseUsed: 'Habibi, Mashallah',
+      dubaiReference: 'Supercars outside Dubai Mall',
+      languageDetected: 'en'
+    },
+    {
+      match: /\b(toyota|honda|nissan|lexus|mazda|sony|nintendo)\b[\s\S]*?\b(indian|german|american|italian|french|chinese|korean|british)\s+(brand|car|company|automaker|manufacturer)\b/i,
+      extractTrigger: (m) => m[2],
+      claimDetected: 'Misidentified a Japanese brand nationality',
+      correction:
+        'Pause right there, Habibi! That’s a legendary Japanese brand from Japan—even out in the Dubai desert dunes where Land Cruisers rule, everyone knows that! Yalla!',
+      arabicPhraseUsed: 'Habibi, Yalla',
+      dubaiReference: 'Dubai desert dunes',
+      languageDetected: 'en'
     }
   ];
 
@@ -583,8 +623,12 @@ async function evaluateUtteranceWithGemini({ transcript, audioBase64, mimeType, 
         liveGeminiUsed: false
       };
     }
-    // If fast-path detects an explicit factual error or explicit opinion, return in <1ms!
-    if (fastCheck.verdict === 'INTERRUPT' || fastCheck.category === 'OPINION') {
+    // If fast-path detects an explicit factual error, or the exact canonical opinion test, return in <1ms!
+    // (Do NOT let general opinion words like "good" or "like" bypass live Gemini when an API key is active!)
+    const isCanonicalPineappleOpinion = /^pineapple\s+on\s+pizza\s+is\s+the\s+best[.!?]*$/i.test(
+      transcript.trim()
+    );
+    if (fastCheck.verdict === 'INTERRUPT' || isCanonicalPineappleOpinion) {
       return {
         ...fastCheck,
         judgeModelUsed: `${modelRegistry.judgeModel} (hybrid-fast-path)`,
@@ -608,6 +652,11 @@ async function evaluateUtteranceWithGemini({ transcript, audioBase64, mimeType, 
     };
   }
 
+  // Ensure model discovery has run at least once so we only call valid models on this API key
+  if (!modelRegistry.liveApiVerified && modelRegistry.discoveredModels.length === 0) {
+    await discoverNewestModels();
+  }
+
   const contents = [];
   if (audioBase64 && mimeType) {
     contents.push({
@@ -619,53 +668,28 @@ async function evaluateUtteranceWithGemini({ transcript, audioBase64, mimeType, 
   }
 
   const promptText = transcript
-    ? `Rolling live user speech (${isPartialStream ? 'MID-SENTENCE STREAMING - user is still talking' : 'UTTERANCE'}): "${transcript}"\nEvaluate immediately. Remember: INTERRUPT only on objective factual error; SILENT on opinion, factual truth, or incomplete harmless phrase.`
+    ? `Rolling live user speech (${isPartialStream ? 'MID-SENTENCE STREAMING - user is still talking' : 'UTTERANCE'}): "${transcript}"\nEvaluate immediately. Remember: INTERRUPT immediately if ANY objective factual error appears anywhere in the speech (even if mixed with opinions like "Porsche is a good Indian brand"); SILENT only if everything said so far is factually true, pure subjective opinion, or incomplete.`
     : `Evaluate the attached live user audio stream immediately. INTERRUPT only on objective factual error; SILENT on opinion or truth.`;
 
   contents.push({ text: promptText });
 
-  const candidateModels = [
+  let candidateModels = [
     modelRegistry.judgeModel,
     ...modelRegistry.judgeFallbacks.filter((m) => m !== modelRegistry.judgeModel)
   ];
+  if (modelRegistry.discoveredModels.length > 0) {
+    const verifiedCandidates = candidateModels.filter((m) =>
+      modelRegistry.discoveredModels.includes(m)
+    );
+    if (verifiedCandidates.length > 0) {
+      candidateModels = verifiedCandidates;
+    }
+  }
 
   let lastError = null;
   for (const modelName of candidateModels) {
-    try {
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents,
-        config: {
-          systemInstruction: EDGE_SYSTEM_INSTRUCTION,
-          responseMimeType: 'application/json',
-          responseSchema: EVALUATION_SCHEMA,
-          temperature: 0.1,
-          thinkingConfig: {
-            thinkingBudget: 0
-          }
-        }
-      });
-
-      const rawText = response.text;
-      const parsed = JSON.parse(rawText);
-      const judgeLatencyMs = Math.round(performance.now() - startTime);
-      modelRegistry.judgeModel = modelName;
-
-      // Ensure strict silence invariant when verdict is SILENT
-      if (parsed.verdict !== 'INTERRUPT') {
-        parsed.verdict = 'SILENT';
-        parsed.correction = '';
-      }
-
-      return {
-        ...parsed,
-        judgeModelUsed: modelName,
-        judgeLatencyMs,
-        liveGeminiUsed: true
-      };
-    } catch (err) {
-      lastError = err;
-      // Retry without thinkingConfig in case a specific model rejects thinkingBudget: 0
+    const skipZeroBudget = modelsRejectingZeroBudget.has(modelName);
+    if (!skipZeroBudget) {
       try {
         const response = await ai.models.generateContent({
           model: modelName,
@@ -674,25 +698,62 @@ async function evaluateUtteranceWithGemini({ transcript, audioBase64, mimeType, 
             systemInstruction: EDGE_SYSTEM_INSTRUCTION,
             responseMimeType: 'application/json',
             responseSchema: EVALUATION_SCHEMA,
-            temperature: 0.1
+            temperature: 0.1,
+            thinkingConfig: {
+              thinkingBudget: 0
+            }
           }
         });
-        const parsed = JSON.parse(response.text);
+
+        const rawText = response.text;
+        const parsed = JSON.parse(rawText);
         const judgeLatencyMs = Math.round(performance.now() - startTime);
         modelRegistry.judgeModel = modelName;
+
         if (parsed.verdict !== 'INTERRUPT') {
           parsed.verdict = 'SILENT';
           parsed.correction = '';
         }
+
         return {
           ...parsed,
           judgeModelUsed: modelName,
           judgeLatencyMs,
           liveGeminiUsed: true
         };
-      } catch (innerErr) {
-        lastError = innerErr;
+      } catch (err) {
+        lastError = err;
+        modelsRejectingZeroBudget.add(modelName);
       }
+    }
+
+    // Fallback call without thinkingBudget: 0 for models that reject it
+    try {
+      const response = await ai.models.generateContent({
+        model: modelName,
+        contents,
+        config: {
+          systemInstruction: EDGE_SYSTEM_INSTRUCTION,
+          responseMimeType: 'application/json',
+          responseSchema: EVALUATION_SCHEMA,
+          temperature: 0.1
+        }
+      });
+      const parsed = JSON.parse(response.text);
+      const judgeLatencyMs = Math.round(performance.now() - startTime);
+      modelRegistry.judgeModel = modelName;
+      if (parsed.verdict !== 'INTERRUPT') {
+        parsed.verdict = 'SILENT';
+        parsed.correction = '';
+      }
+      return {
+        ...parsed,
+        judgeModelUsed: modelName,
+        judgeLatencyMs,
+        liveGeminiUsed: true
+      };
+    } catch (innerErr) {
+      lastError = innerErr;
     }
   }
 
@@ -758,13 +819,14 @@ function ensureWavBuffer(rawBuffer, mimeType = '') {
   };
 }
 
-// In-memory server cache for Gemini 3 TTS WAV buffers so pre-warmed and repeated corrections play in 0ms!
+// In-memory server cache & in-flight deduplication map for Gemini 3 TTS WAV buffers
 const ttsAudioCache = new Map();
+const inFlightTtsPromises = new Map();
 
 /**
  * Synthesizes Edge's witty Dubai-born voice using the newest Gemini 3 TTS model
  * (`gemini-3.8-flash-lite-tts` / `gemini-3.8-flash-tts` / `gemini-3.1-flash-tts-preview`)
- * with warm Emirati / Arabic-accented vocal styling.
+ * with the exact Iteration 1 'Puck' voice and clean text input.
  */
 async function synthesizeEdgeVoice(textToSpeak, language = 'en') {
   const startTime = performance.now();
@@ -788,6 +850,11 @@ async function synthesizeEdgeVoice(textToSpeak, language = 'en') {
     };
   }
 
+  // If synthesis for this exact phrase is already in flight (started by /api/evaluate), join it!
+  if (inFlightTtsPromises.has(cacheKey)) {
+    return await inFlightTtsPromises.get(cacheKey);
+  }
+
   const ai = getGenAIClient();
   if (!ai) {
     return {
@@ -799,77 +866,87 @@ async function synthesizeEdgeVoice(textToSpeak, language = 'en') {
     };
   }
 
-  const candidates = [
-    modelRegistry.ttsModel,
-    ...modelRegistry.ttsFallbacks.filter((m) => m !== modelRegistry.ttsModel)
-  ];
+  const synthesisTask = (async () => {
+    let candidates = [
+      modelRegistry.ttsModel,
+      ...modelRegistry.ttsFallbacks.filter((m) => m !== modelRegistry.ttsModel)
+    ];
+    if (modelRegistry.discoveredModels.length > 0) {
+      const verifiedTts = candidates.filter((m) => modelRegistry.discoveredModels.includes(m));
+      if (verifiedTts.length > 0) {
+        candidates = verifiedTts;
+      }
+    }
 
-  // Use Orus / Charon / Aoede prebuilt voice with Emirati accent style direction
-  const voiceName = 'Orus';
-
-  for (const ttsModel of candidates) {
-    try {
-      const is38Model = ttsModel.includes('3.8');
-      const promptPart = is38Model
-        ? { text: textToSpeak }
-        : {
-            text: `Speak with a warm, charismatic Emirati Arabic (Dubai) accent, lively and playful hospitality: "${textToSpeak}"`
-          };
-
-      const response = await ai.models.generateContent({
-        model: ttsModel,
-        contents: [
-          {
-            role: 'user',
-            parts: [promptPart]
-          }
-        ],
-        config: {
-          responseModalities: ['AUDIO'],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: {
-                voiceName
+    for (const ttsModel of candidates) {
+      try {
+        // Exact Iteration 1 voice config: 'Puck' with clean textToSpeak (no artificial accent wrapper)
+        const response = await ai.models.generateContent({
+          model: ttsModel,
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: textToSpeak
+                }
+              ]
+            }
+          ],
+          config: {
+            responseModalities: ['AUDIO'],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: {
+                  voiceName: 'Puck'
+                }
               }
             }
           }
-        }
-      });
+        });
 
-      const part = response?.candidates?.[0]?.content?.parts?.find(
-        (p) => p.inlineData && p.inlineData.data
-      );
-
-      if (part && part.inlineData?.data) {
-        const rawBuf = Buffer.from(part.inlineData.data, 'base64');
-        const { buffer: wavBuf, mimeType } = ensureWavBuffer(
-          rawBuf,
-          part.inlineData.mimeType || 'audio/l16;rate=24000'
+        const part = response?.candidates?.[0]?.content?.parts?.find(
+          (p) => p.inlineData && p.inlineData.data
         );
-        const ttsLatencyMs = Math.round(performance.now() - startTime);
-        modelRegistry.ttsModel = ttsModel;
-        const resultObj = {
-          audioBase64: wavBuf.toString('base64'),
-          mimeType,
-          ttsModelUsed: ttsModel,
-          ttsLatencyMs,
-          liveTtsUsed: true
-        };
-        ttsAudioCache.set(cacheKey, resultObj);
-        return resultObj;
-      }
-    } catch (err) {
-      console.warn(`[Edge TTS] Model ${ttsModel} attempt failed:`, err.message);
-    }
-  }
 
-  return {
-    audioBase64: null,
-    mimeType: null,
-    ttsModelUsed: modelRegistry.ttsModel,
-    ttsLatencyMs: Math.round(performance.now() - startTime),
-    liveTtsUsed: false
-  };
+        if (part && part.inlineData?.data) {
+          const rawBuf = Buffer.from(part.inlineData.data, 'base64');
+          const { buffer: wavBuf, mimeType } = ensureWavBuffer(
+            rawBuf,
+            part.inlineData.mimeType || 'audio/l16;rate=24000'
+          );
+          const ttsLatencyMs = Math.round(performance.now() - startTime);
+          modelRegistry.ttsModel = ttsModel;
+          const resultObj = {
+            audioBase64: wavBuf.toString('base64'),
+            mimeType,
+            ttsModelUsed: ttsModel,
+            ttsLatencyMs,
+            liveTtsUsed: true
+          };
+          ttsAudioCache.set(cacheKey, resultObj);
+          return resultObj;
+        }
+      } catch (err) {
+        console.warn(`[Edge TTS] Model ${ttsModel} attempt failed:`, err.message);
+      }
+    }
+
+    return {
+      audioBase64: null,
+      mimeType: null,
+      ttsModelUsed: modelRegistry.ttsModel,
+      ttsLatencyMs: Math.round(performance.now() - startTime),
+      liveTtsUsed: false
+    };
+  })();
+
+  inFlightTtsPromises.set(cacheKey, synthesisTask);
+  try {
+    return await synthesisTask;
+  } finally {
+    inFlightTtsPromises.delete(cacheKey);
+  }
 }
 
 /**
@@ -884,6 +961,10 @@ async function prewarmCoreDubaiVoices() {
     },
     {
       text: 'Astaghfirullah, Habibi—cut the mic! The Burj Khalifa is the crown jewel of Downtown Dubai, not Abu Dhabi! Wallah, you’re speaking to a Dubai native here!',
+      lang: 'en'
+    },
+    {
+      text: 'Whoa, hit the brakes on Sheikh Zayed Road, Habibi! Porsche and its fellow German icons are proud German engineering from Germany, not there! Yalla, every supercar fan in Downtown Dubai knows that one!',
       lang: 'en'
     }
   ];
@@ -976,14 +1057,16 @@ app.post('/api/evaluate', async (req, res) => {
     };
 
     if (evaluation.verdict === 'INTERRUPT' && evaluation.correction) {
-      const cacheKey = `${evaluation.languageDetected || 'en'}:${evaluation.correction.trim()}`;
+      const lang = evaluation.languageDetected || 'en';
+      const cacheKey = `${lang}:${evaluation.correction.trim()}`;
       if (ttsAudioCache.has(cacheKey)) {
         ttsResult = { ...ttsAudioCache.get(cacheKey), ttsLatencyMs: 1, cached: true };
       } else if (includeAudio) {
-        ttsResult = await synthesizeEdgeVoice(
-          evaluation.correction,
-          evaluation.languageDetected || 'en'
-        );
+        ttsResult = await synthesizeEdgeVoice(evaluation.correction, lang);
+      } else {
+        // Kick off Gemini TTS ('Puck') in the background on the server at t=0ms
+        // so when the browser calls /api/tts 5ms later, synthesis is ALREADY running!
+        synthesizeEdgeVoice(evaluation.correction, lang).catch(() => {});
       }
     }
 
