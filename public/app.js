@@ -80,10 +80,114 @@ function ensureAudioContext() {
   return audioCtx;
 }
 
+// Pre-load and cache browser voices so we can pick an authentic Arabic / Emirati voice
+let availableBrowserVoices = [];
+function refreshBrowserVoices() {
+  if ('speechSynthesis' in window) {
+    availableBrowserVoices = window.speechSynthesis.getVoices() || [];
+  }
+}
+if ('speechSynthesis' in window) {
+  refreshBrowserVoices();
+  window.speechSynthesis.onvoiceschanged = refreshBrowserVoices;
+}
+
 /**
- * Plays a crisp 24K golden acoustic chime the instant Edge cuts in,
- * or decodes and plays the Gemini 3 TTS WAV audio buffer while syncing the mascot visualizer.
- * Returns a Promise that resolves at the exact millisecond the first acoustic frame starts!
+ * Selects the best Arabic / Emirati (or deep Middle-Eastern / Multilingual) voice installed on the system,
+ * strictly avoiding British female voices (like Microsoft Hazel / Libby / Sonia / Google UK English Female).
+ */
+function pickBestEmiratiVoice(language = 'en') {
+  if (!availableBrowserVoices.length) refreshBrowserVoices();
+  const voices = availableBrowserVoices;
+  if (!voices.length) return null;
+
+  // 1. If speaking Hindi, prefer Hindi voice
+  if (language === 'hi') {
+    const hiVoice = voices.find((v) => /^hi(-|_|$)/i.test(v.lang));
+    if (hiVoice) return hiVoice;
+  }
+
+  // 2. Prefer UAE Arabic (ar-AE) or Gulf/Arabic voices (Hamdan, Fatima, Hamed, Naayf, Majed, Zariyah, Salma, Tarik, Maged)
+  const emiratiOrArabicMatch = voices.find(
+    (v) =>
+      /ar-AE|ar_AE/i.test(v.lang) ||
+      /hamdan|fatima|hamed|naayf|majed|maged|tarik|zariyah|salma|laila|amira|arabic/i.test(v.name)
+  );
+  if (emiratiOrArabicMatch) return emiratiOrArabicMatch;
+
+  const anyArabicLang = voices.find((v) => /^ar(-|_|$)/i.test(v.lang));
+  if (anyArabicLang) return anyArabicLang;
+
+  // 3. Prefer warm Multilingual / Natural male voices (Andrew, Brian, Guy, Davis, Christopher, Ryan,Prabhat)
+  // and explicitly exclude British female voices ("Hazel", "Libby", "Sonia", "UK English Female", "Susan")
+  const nonBritishFemale = voices.filter(
+    (v) => !/hazel|libby|sonia|susan|uk english female|kate|serena/i.test(v.name)
+  );
+
+  const preferredWarmVoice = nonBritishFemale.find((v) =>
+    /multilingual|andrew|brian|guy|davis|christopher|roger|steffan|prabhat|daniel|alex/i.test(
+      v.name
+    )
+  );
+  if (preferredWarmVoice) return preferredWarmVoice;
+
+  return nonBritishFemale[0] || voices[0];
+}
+
+async function decodeAndPlayWavBase64(audioBase64) {
+  const ctx = ensureAudioContext();
+  if (currentAudioSource) {
+    try {
+      currentAudioSource.stop();
+    } catch (e) {
+      // ignore
+    }
+    currentAudioSource = null;
+  }
+  if ('speechSynthesis' in window) {
+    window.speechSynthesis.cancel();
+  }
+
+  const binaryString = atob(audioBase64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+
+  const audioBuffer = await ctx.decodeAudioData(bytes.buffer.slice(0));
+  const source = ctx.createBufferSource();
+  source.buffer = audioBuffer;
+
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 128;
+  source.connect(analyser);
+  analyser.connect(ctx.destination);
+  mascot.connectAnalyser(analyser);
+
+  const startMoment = performance.now();
+  source.start(0);
+  currentAudioSource = source;
+
+  source.onended = () => {
+    mascot.connectAnalyser(null);
+    currentAudioSource = null;
+    if (mascot.state === 'INTERRUPT_SPEAKING') {
+      mascot.setState(isMicListening ? 'LISTENING' : 'IDLE');
+      updateMascotStateUI(
+        isMicListening ? 'LISTENING' : 'IDLE',
+        isMicListening
+          ? 'LIVE MIC ACTIVE • RE-CHECKING EVERY WORD MID-SENTENCE'
+          : 'PASSIVE GUARDIAN • LISTENING EVERY 2–3 WORDS'
+      );
+    }
+  };
+  return startMoment;
+}
+
+/**
+ * Plays an instant 24K golden acoustic cut-in chime at t=0ms (locking the exact Wrong-Word-to-First-Sound latency)
+ * and plays Edge's voice using Gemini 3 TTS (Emirati "Orus" voice) or the best Arabic/Emirati system voice.
  */
 async function playEdgeCutInVoice({ correction, audioBase64, language = 'en' }) {
   const ctx = ensureAudioContext();
@@ -109,56 +213,22 @@ async function playEdgeCutInVoice({ correction, audioBase64, language = 'en' }) 
   mascot.setState('INTERRUPT_SPEAKING');
   updateMascotStateUI('INTERRUPT_SPEAKING', 'EDGE CUTTING IN OUT LOUD • DUBAI FACT GUARDIAN');
 
-  // If Gemini 3 TTS returned WAV audio bytes from the server, play via Web Audio API + AnalyserNode
+  // 1. If Gemini 3 TTS WAV audio is already cached/present in the response, play it immediately!
   if (audioBase64) {
     try {
-      const binaryString = atob(audioBase64);
-      const len = binaryString.length;
-      const bytes = new Uint8Array(len);
-      for (let i = 0; i < len; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
-      }
-
-      const audioBuffer = await ctx.decodeAudioData(bytes.buffer.slice(0));
-      const source = ctx.createBufferSource();
-      source.buffer = audioBuffer;
-
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 128;
-      source.connect(analyser);
-      analyser.connect(ctx.destination);
-      mascot.connectAnalyser(analyser);
-
-      const firstSoundTime = performance.now();
-      source.start(0);
-      currentAudioSource = source;
-
-      source.onended = () => {
-        mascot.connectAnalyser(null);
-        if (mascot.state === 'INTERRUPT_SPEAKING') {
-          mascot.setState(isMicListening ? 'LISTENING' : 'IDLE');
-          updateMascotStateUI(
-            isMicListening ? 'LISTENING' : 'IDLE',
-            isMicListening
-              ? 'LIVE MIC ACTIVE • RE-CHECKING EVERY 2–3 WORDS'
-              : 'PASSIVE GUARDIAN • LISTENING EVERY 2–3 WORDS'
-          );
-        }
-      };
-
-      return firstSoundTime;
+      return await decodeAndPlayWavBase64(audioBase64);
     } catch (decodeErr) {
-      console.warn('[Edge Audio] Falling back to instant Web Audio + Speech Synthesis:', decodeErr);
+      console.warn('[Edge Audio] Falling back from inline WAV:', decodeErr);
     }
   }
 
-  // Instant acoustic signature + Web Speech API voice synthesis so Edge ALWAYS speaks out loud
+  // 2. Fire instant acoustic cut-in signature at t=0ms so the user hears Edge cut them off immediately!
   const osc = ctx.createOscillator();
   const gain = ctx.createGain();
   osc.type = 'triangle';
   osc.frequency.setValueAtTime(528, ctx.currentTime);
   osc.frequency.exponentialRampToValueAtTime(792, ctx.currentTime + 0.11);
-  gain.gain.setValueAtTime(0.14, ctx.currentTime);
+  gain.gain.setValueAtTime(0.15, ctx.currentTime);
   gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15);
   osc.connect(gain);
   gain.connect(ctx.destination);
@@ -166,11 +236,52 @@ async function playEdgeCutInVoice({ correction, audioBase64, language = 'en' }) 
   osc.start();
   osc.stop(ctx.currentTime + 0.16);
 
-  if ('speechSynthesis' in window && correction) {
+  // 3. Request studio-grade Gemini 3 TTS (Emirati-styled "Orus" voice) from /api/tts in parallel;
+  // if the server has a Gemini API key and returns WAV audio quickly, play that; otherwise speak via Arabic/Emirati voice!
+  let ttsPlayed = false;
+  const ttsPromise = fetch('/api/tts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: correction, language })
+  })
+    .then((r) => (r.ok ? r.json() : null))
+    .catch(() => null);
+
+  // Wait up to 420ms to see if live Gemini 3 TTS returns studio audio; if not, start local Emirati/Arabic voice immediately
+  const raceResult = await Promise.race([
+    ttsPromise,
+    new Promise((resolve) => setTimeout(() => resolve('TIMEOUT'), 420))
+  ]);
+
+  if (raceResult && raceResult !== 'TIMEOUT' && raceResult.audioBase64) {
+    try {
+      ttsPlayed = true;
+      lastSpokenAudioBase64 = raceResult.audioBase64;
+      await decodeAndPlayWavBase64(raceResult.audioBase64);
+      return firstSoundTime;
+    } catch (e) {
+      ttsPlayed = false;
+    }
+  } else {
+    // Also cache the TTS audio when it finishes in the background so future replays use Gemini 3 TTS!
+    ttsPromise.then((res) => {
+      if (res && res.audioBase64) {
+        lastSpokenAudioBase64 = res.audioBase64;
+      }
+    });
+  }
+
+  if (!ttsPlayed && 'speechSynthesis' in window && correction) {
     const utter = new SpeechSynthesisUtterance(correction);
-    utter.lang = language === 'ar' ? 'ar-AE' : language === 'hi' ? 'hi-IN' : 'en-GB';
-    utter.rate = 1.06;
-    utter.pitch = 1.04;
+    const chosenVoice = pickBestEmiratiVoice(language);
+    if (chosenVoice) {
+      utter.voice = chosenVoice;
+      utter.lang = chosenVoice.lang;
+    } else {
+      utter.lang = language === 'ar' ? 'ar-AE' : language === 'hi' ? 'hi-IN' : 'ar-AE';
+    }
+    utter.rate = 1.03;
+    utter.pitch = 0.96;
 
     utter.onend = () => {
       if (mascot.state === 'INTERRUPT_SPEAKING') {
@@ -178,7 +289,7 @@ async function playEdgeCutInVoice({ correction, audioBase64, language = 'en' }) 
         updateMascotStateUI(
           isMicListening ? 'LISTENING' : 'IDLE',
           isMicListening
-            ? 'LIVE MIC ACTIVE • RE-CHECKING EVERY 2–3 WORDS'
+            ? 'LIVE MIC ACTIVE • RE-CHECKING EVERY WORD MID-SENTENCE'
             : 'PASSIVE GUARDIAN • LISTENING EVERY 2–3 WORDS'
         );
       }
@@ -186,7 +297,7 @@ async function playEdgeCutInVoice({ correction, audioBase64, language = 'en' }) 
     window.speechSynthesis.speak(utter);
   }
 
-  // Also keep visual speaking state active for natural duration of the sentence
+  // Keep visual speaking state active for natural duration of the sentence
   const estimatedDurationMs = Math.max(2600, Math.min(6200, correction.length * 42));
   setTimeout(() => {
     if (mascot.state === 'INTERRUPT_SPEAKING' && !currentAudioSource) {
@@ -194,7 +305,7 @@ async function playEdgeCutInVoice({ correction, audioBase64, language = 'en' }) 
       updateMascotStateUI(
         isMicListening ? 'LISTENING' : 'IDLE',
         isMicListening
-          ? 'LIVE MIC ACTIVE • RE-CHECKING EVERY 2–3 WORDS'
+          ? 'LIVE MIC ACTIVE • RE-CHECKING EVERY WORD MID-SENTENCE'
           : 'PASSIVE GUARDIAN • LISTENING EVERY 2–3 WORDS'
       );
     }

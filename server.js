@@ -758,14 +758,38 @@ function ensureWavBuffer(rawBuffer, mimeType = '') {
   };
 }
 
+// In-memory server cache for Gemini 3 TTS WAV buffers so pre-warmed and repeated corrections play in 0ms!
+const ttsAudioCache = new Map();
+
 /**
  * Synthesizes Edge's witty Dubai-born voice using the newest Gemini 3 TTS model
- * (`gemini-3.8-flash-lite-tts` / `gemini-3.8-flash-tts` / `gemini-3.1-flash-tts-preview`).
+ * (`gemini-3.8-flash-lite-tts` / `gemini-3.8-flash-tts` / `gemini-3.1-flash-tts-preview`)
+ * with warm Emirati / Arabic-accented vocal styling.
  */
 async function synthesizeEdgeVoice(textToSpeak, language = 'en') {
   const startTime = performance.now();
+  if (!textToSpeak) {
+    return {
+      audioBase64: null,
+      mimeType: null,
+      ttsModelUsed: modelRegistry.ttsModel,
+      ttsLatencyMs: 0,
+      liveTtsUsed: false
+    };
+  }
+
+  const cacheKey = `${language}:${textToSpeak.trim()}`;
+  if (ttsAudioCache.has(cacheKey)) {
+    const cached = ttsAudioCache.get(cacheKey);
+    return {
+      ...cached,
+      ttsLatencyMs: 1,
+      cached: true
+    };
+  }
+
   const ai = getGenAIClient();
-  if (!ai || !textToSpeak) {
+  if (!ai) {
     return {
       audioBase64: null,
       mimeType: null,
@@ -780,19 +804,24 @@ async function synthesizeEdgeVoice(textToSpeak, language = 'en') {
     ...modelRegistry.ttsFallbacks.filter((m) => m !== modelRegistry.ttsModel)
   ];
 
+  // Use Orus / Charon / Aoede prebuilt voice with Emirati accent style direction
+  const voiceName = 'Orus';
+
   for (const ttsModel of candidates) {
     try {
-      // Gemini 3.8 TTS & 3.1 TTS support AUDIO responseModality with prebuilt voiceConfig
+      const is38Model = ttsModel.includes('3.8');
+      const promptPart = is38Model
+        ? { text: textToSpeak }
+        : {
+            text: `Speak with a warm, charismatic Emirati Arabic (Dubai) accent, lively and playful hospitality: "${textToSpeak}"`
+          };
+
       const response = await ai.models.generateContent({
         model: ttsModel,
         contents: [
           {
             role: 'user',
-            parts: [
-              {
-                text: textToSpeak
-              }
-            ]
+            parts: [promptPart]
           }
         ],
         config: {
@@ -800,7 +829,7 @@ async function synthesizeEdgeVoice(textToSpeak, language = 'en') {
           speechConfig: {
             voiceConfig: {
               prebuiltVoiceConfig: {
-                voiceName: 'Puck'
+                voiceName
               }
             }
           }
@@ -819,13 +848,15 @@ async function synthesizeEdgeVoice(textToSpeak, language = 'en') {
         );
         const ttsLatencyMs = Math.round(performance.now() - startTime);
         modelRegistry.ttsModel = ttsModel;
-        return {
+        const resultObj = {
           audioBase64: wavBuf.toString('base64'),
           mimeType,
           ttsModelUsed: ttsModel,
           ttsLatencyMs,
           liveTtsUsed: true
         };
+        ttsAudioCache.set(cacheKey, resultObj);
+        return resultObj;
       }
     } catch (err) {
       console.warn(`[Edge TTS] Model ${ttsModel} attempt failed:`, err.message);
@@ -839,6 +870,26 @@ async function synthesizeEdgeVoice(textToSpeak, language = 'en') {
     ttsLatencyMs: Math.round(performance.now() - startTime),
     liveTtsUsed: false
   };
+}
+
+/**
+ * Pre-warms Gemini TTS cache in the background for core Dubai corrections once API key is set.
+ */
+async function prewarmCoreDubaiVoices() {
+  if (!getGenAIClient()) return;
+  const coreLines = [
+    {
+      text: 'Hold right there, Habibi! The Eiffel Tower is in Paris, not London—that’s like looking for the Burj Khalifa in the middle of the Thames! Yalla, let’s keep our landmarks straight.',
+      lang: 'en'
+    },
+    {
+      text: 'Astaghfirullah, Habibi—cut the mic! The Burj Khalifa is the crown jewel of Downtown Dubai, not Abu Dhabi! Wallah, you’re speaking to a Dubai native here!',
+      lang: 'en'
+    }
+  ];
+  for (const item of coreLines) {
+    synthesizeEdgeVoice(item.text, item.lang).catch(() => {});
+  }
 }
 
 // ============================================================================
@@ -886,6 +937,7 @@ app.post('/api/config-key', async (req, res) => {
     // Ignore write error if read-only
   }
   await discoverNewestModels();
+  prewarmCoreDubaiVoices();
   res.json({
     ok: true,
     apiKeyConfigured: true,
@@ -923,11 +975,16 @@ app.post('/api/evaluate', async (req, res) => {
       liveTtsUsed: false
     };
 
-    if (evaluation.verdict === 'INTERRUPT' && evaluation.correction && includeAudio) {
-      ttsResult = await synthesizeEdgeVoice(
-        evaluation.correction,
-        evaluation.languageDetected || 'en'
-      );
+    if (evaluation.verdict === 'INTERRUPT' && evaluation.correction) {
+      const cacheKey = `${evaluation.languageDetected || 'en'}:${evaluation.correction.trim()}`;
+      if (ttsAudioCache.has(cacheKey)) {
+        ttsResult = { ...ttsAudioCache.get(cacheKey), ttsLatencyMs: 1, cached: true };
+      } else if (includeAudio) {
+        ttsResult = await synthesizeEdgeVoice(
+          evaluation.correction,
+          evaluation.languageDetected || 'en'
+        );
+      }
     }
 
     const serverTotalLatencyMs = Math.round(performance.now() - totalStart);
@@ -1022,6 +1079,7 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, async () => {
   console.log(`✨ Edge (The Cutting Edge Group — Dubai) listening on http://localhost:${PORT}`);
   await discoverNewestModels();
+  prewarmCoreDubaiVoices();
   console.log(
     `🚀 Active Models — Judge: ${modelRegistry.judgeModel} | Voice TTS: ${modelRegistry.ttsModel}`
   );
