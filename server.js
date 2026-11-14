@@ -33,22 +33,18 @@ if (!serverApiKey && fs.existsSync(ENV_FILE_PATH)) {
 
 // Active model registry discovered from the live Gemini API
 const modelRegistry = {
-  judgeModel: 'gemini-3.1-flash-lite-preview',
+  judgeModel: 'gemini-3.5-flash-lite',
   judgeFallbacks: [
     'gemini-3.5-flash-lite',
     'gemini-3.1-flash-lite',
     'gemini-3.1-flash-lite-preview',
-    'gemini-3.8-flash',
-    'gemini-3.6-flash',
     'gemini-3-flash-preview',
-    'gemini-2.5-flash-lite',
     'gemini-2.5-flash'
   ],
-  ttsModel: 'gemini-3.1-flash-tts-preview',
+  ttsModel: 'gemini-3.8-flash-lite-tts',
   ttsFallbacks: [
     'gemini-3.8-flash-lite-tts',
     'gemini-3.8-flash-tts',
-    'gemini-3.1-flash-tts-preview',
     'gemini-2.5-flash-preview-tts'
   ],
   discoveredModels: [],
@@ -56,8 +52,8 @@ const modelRegistry = {
   liveApiVerified: false
 };
 
-// Track models that reject thinkingBudget: 0 so we never double-call them on future checks
-const modelsRejectingZeroBudget = new Set();
+// Track models that reject thinkingLevel: 'MINIMAL' so we never double-call them on future checks
+const modelsRejectingMinimalThinking = new Set();
 
 function getGenAIClient() {
   if (!serverApiKey) return null;
@@ -66,7 +62,7 @@ function getGenAIClient() {
 
 /**
  * Dynamically queries ai.models.list() to discover the newest, fastest
- * Gemini 3 Flash-Lite judge model and Gemini 3 TTS model available for the key.
+ * Gemini 3 Flash-Lite judge model and Gemini TTS model available for the key.
  */
 async function discoverNewestModels() {
   const ai = getGenAIClient();
@@ -87,17 +83,12 @@ async function discoverNewestModels() {
       modelRegistry.lastDiscoveryAt = new Date().toISOString();
       modelRegistry.liveApiVerified = true;
 
-      // Pick the newest available Flash-Lite / Flash model for ultra-fast judging
+      // Pick the fastest Gemini 3 Flash-Lite model available on the user's key
       const preferredJudgeOrder = [
         'gemini-3.5-flash-lite',
         'gemini-3.1-flash-lite',
         'gemini-3.1-flash-lite-preview',
-        'gemini-3.8-flash',
-        'gemini-3.7-flash',
-        'gemini-3.6-flash',
-        'gemini-3.5-flash',
         'gemini-3-flash-preview',
-        'gemini-2.5-flash-lite',
         'gemini-2.5-flash'
       ];
       for (const candidate of preferredJudgeOrder) {
@@ -106,20 +97,11 @@ async function discoverNewestModels() {
           break;
         }
       }
-      // If another newer gemini-3*flash-lite exists, prefer it
-      const dynamicFlashLite = availableNames
-        .filter((n) => /^gemini-3(\.\d+)?-flash-lite(-preview)?$/.test(n))
-        .sort()
-        .reverse();
-      if (dynamicFlashLite.length > 0) {
-        modelRegistry.judgeModel = dynamicFlashLite[0];
-      }
 
-      // Pick the newest available Gemini TTS model
+      // Pick the newest Gemini 3 TTS model available
       const preferredTtsOrder = [
         'gemini-3.8-flash-lite-tts',
         'gemini-3.8-flash-tts',
-        'gemini-3.1-flash-tts-preview',
         'gemini-2.5-flash-preview-tts'
       ];
       for (const candidate of preferredTtsOrder) {
@@ -127,13 +109,6 @@ async function discoverNewestModels() {
           modelRegistry.ttsModel = candidate;
           break;
         }
-      }
-      const dynamicTts = availableNames
-        .filter((n) => n.includes('tts') && n.startsWith('gemini-3'))
-        .sort()
-        .reverse();
-      if (dynamicTts.length > 0 && !preferredTtsOrder.includes(modelRegistry.ttsModel)) {
-        modelRegistry.ttsModel = dynamicTts[0];
       }
     }
   } catch (err) {
@@ -147,9 +122,9 @@ You are listening to a live stream of what the user is saying in real time—eva
 
 YOUR CORE DIRECTIVE:
 1. INTERRUPT IMMEDIATELY ON FACTUAL ERRORS ("verdict": "INTERRUPT"):
-   - The moment the user's words contain an objective factual error (geography, science, history, landmarks, math, nature, culture, etc.), you MUST set "verdict": "INTERRUPT".
-   - Do NOT wait for the user to finish a long rambling sentence if they have already stated a false claim (for example, as soon as they say "The Eiffel Tower is in London" or "The Burj Khalifa is in Abu Dhabi", cut in immediately!).
-   - Identify the exact word or short phrase that made the claim wrong in "wrongTriggerWord" (e.g., "London", "Abu Dhabi", "Mumbai", "أبوظبي").
+   - The moment the user's words contain an objective factual error (geography, brands/cars, science, history, landmarks, math, nature, culture, etc.), you MUST set "verdict": "INTERRUPT".
+   - Do NOT wait for the user to finish a long rambling sentence if they have already stated a false claim (for example, as soon as they say "The Eiffel Tower is in London", "The Burj Khalifa is in Abu Dhabi", or "Porsche is an Indian brand", cut in immediately!).
+   - Identify the exact word or short phrase that made the claim wrong in "wrongTriggerWord" (e.g., "London", "Abu Dhabi", "Indian", "Mumbai", "أبوظبي").
 
 2. STAY COMPLETELY QUIET ON OPINIONS, TRUTHS, OR INCOMPLETE FRAGMENTS ("verdict": "SILENT"):
    - If the user expresses a personal opinion, taste preference, or subjective view (e.g., "Pineapple on pizza is the best", "I think summer is better than winter", "Dubai traffic is crazy"), set "verdict": "SILENT" and "category": "OPINION".
@@ -161,8 +136,8 @@ YOUR CORE DIRECTIVE:
    - Warm Emirati hospitality with a playful, razor-sharp witty edge.
    - Sprinkle light Arabic expressions naturally—never forced (choose 1 or 2 per correction: "Habibi", "Yalla", "Mashallah", "Wallah", "Ya salam", "Khalas").
    - Understand English, Arabic, and Hindi seamlessly. Respond in the primary language the user spoke (or English with warm Arabic flair if they spoke English).
-   - Reference Dubai landmarks, life, or pride naturally where it fits (e.g., comparing landmarks to Downtown Dubai, Burj Khalifa, Marina, Sheikh Zayed Road, Creek, or desert mirages).
-   - Keep the spoken "correction" SHORT, PUNCHY, and CONVERSATIONAL (1 to 2 sentences, 15 to 30 words max) so it hits like an instant live voice cut-in!`;
+   - Reference Dubai landmarks, life, or pride naturally where it fits (e.g., Burj Khalifa, Downtown Dubai, Sheikh Zayed Road).
+   - Keep the spoken "correction" ULTRA-SHORT, PUNCHY, and FAST (1 single sentence, 10 to 18 words max!) so it synthesizes and cuts in instantaneously!`;
 
 const EVALUATION_SCHEMA = {
   type: Type.OBJECT,
@@ -185,7 +160,7 @@ const EVALUATION_SCHEMA = {
     },
     correction: {
       type: Type.STRING,
-      description: 'If INTERRUPT: Edge\'s short, playful, Dubai-born spoken cut-in correction with natural light Arabic phrases and Dubai reference. If SILENT: empty string "".'
+      description: 'If INTERRUPT: Edge\'s ultra-short (10-18 words max), playful, Dubai-born spoken cut-in correction with natural light Arabic phrases and Dubai reference. If SILENT: empty string "".'
     },
     arabicPhraseUsed: {
       type: Type.STRING,
@@ -213,28 +188,19 @@ const EVALUATION_SCHEMA = {
 };
 
 /**
- * Deterministic ultra-low-latency fast-path & fallback engine for core factual/opinion checks
- * Used to guarantee sub-millisecond verification or when GEMINI_API_KEY is not yet configured,
- * while always preferring live Gemini 3 Flash-Lite when GEMINI_API_KEY is present.
+ * Deterministic ultra-low-latency fast-path & fallback engine for core factual/opinion checks.
+ * Evaluates factualChecks FIRST (before checking trailing prepositions) so mid-sentence errors
+ * trigger an immediate <1ms INTERRUPT even if the user has already started the next word!
  */
 function deterministicDubaiJudge(transcript = '') {
   const clean = transcript.trim();
   const lower = clean.toLowerCase();
 
-  // Check if fragment is too short or ends mid-preposition / mid-city-prefix
   const words = clean.split(/\s+/).filter(Boolean);
   const lastWordLower = (words[words.length - 1] || '').replace(/[.,!?]/g, '').toLowerCase();
-  const incompleteTrailingTokens = new Set([
-    'in',
-    'at',
-    'to',
-    'from',
-    'the',
-    'a',
-    'an',
-    'is',
-    'are',
-    'was',
+
+  // Multi-word city/place prefixes where we must wait for the second word (e.g. "Abu" -> "Abu Dhabi")
+  const multiWordPlacePrefixes = new Set([
     'abu',
     'new',
     'los',
@@ -249,14 +215,11 @@ function deterministicDubaiJudge(transcript = '') {
     'saudi',
     'south',
     'north',
-    'في',
-    'من',
-    'على',
     'أبو',
     'ابو'
   ]);
 
-  if (words.length < 3 || incompleteTrailingTokens.has(lastWordLower)) {
+  if (words.length < 3 || multiWordPlacePrefixes.has(lastWordLower)) {
     return {
       verdict: 'SILENT',
       category: 'INCOMPLETE',
@@ -268,6 +231,23 @@ function deterministicDubaiJudge(transcript = '') {
       languageDetected: detectScriptLanguage(clean)
     };
   }
+
+  // Trailing prepositions/articles only mark a short phrase incomplete IF no factual error has occurred yet
+  const trailingPrepositions = new Set([
+    'in',
+    'at',
+    'to',
+    'from',
+    'the',
+    'a',
+    'an',
+    'is',
+    'are',
+    'was',
+    'في',
+    'من',
+    'على'
+  ]);
 
   // Opinions (MUST stay silent)
   const opinionPatterns = [
@@ -550,6 +530,26 @@ function deterministicDubaiJudge(transcript = '') {
       arabicPhraseUsed: 'Habibi, Yalla',
       dubaiReference: 'Dubai desert dunes',
       languageDetected: 'en'
+    },
+    {
+      match: /\b(messi|lionel\s+messi)\b[\s\S]*?\b(from\s+|is\s+)(brazil|spain|portugal|france|england|germany|italy|india|brazilian|spanish|portuguese|french)\b/i,
+      extractTrigger: (m) => m[3],
+      claimDetected: 'Misidentified Lionel Messi nationality',
+      correction:
+        'Whoa, red card right there, Habibi! Lionel Messi is proud Argentine from Argentina, not there—Wallah, every football fan watching at Dubai Marina knows that! Yalla!',
+      arabicPhraseUsed: 'Habibi, Wallah, Yalla',
+      dubaiReference: 'Football fans at Dubai Marina',
+      languageDetected: 'en'
+    },
+    {
+      match: /\b(ronaldo|cristiano\s+ronaldo)\b[\s\S]*?\b(from\s+|is\s+)(brazil|spain|argentina|france|england|germany|italy|brazilian|spanish|argentinian)\b/i,
+      extractTrigger: (m) => m[3],
+      claimDetected: 'Misidentified Cristiano Ronaldo nationality',
+      correction:
+        'Hold the whistle, Habibi! Cristiano Ronaldo is from Portugal—even when he visits Downtown Dubai for the Globe Soccer Awards, everyone knows he’s Portuguese! Mashallah!',
+      arabicPhraseUsed: 'Habibi, Mashallah',
+      dubaiReference: 'Globe Soccer Awards in Downtown Dubai',
+      languageDetected: 'en'
     }
   ];
 
@@ -585,6 +585,20 @@ function deterministicDubaiJudge(transcript = '') {
     }
   }
 
+  // If no factual error has occurred yet and the short phrase ends on a trailing preposition/article (e.g. "The Eiffel Tower is in"), mark INCOMPLETE
+  if (words.length <= 6 && trailingPrepositions.has(lastWordLower)) {
+    return {
+      verdict: 'SILENT',
+      category: 'INCOMPLETE',
+      wrongTriggerWord: '',
+      claimDetected: clean,
+      correction: '',
+      arabicPhraseUsed: '',
+      dubaiReference: '',
+      languageDetected: detectScriptLanguage(clean)
+    };
+  }
+
   return {
     verdict: 'SILENT',
     category: 'FACTUAL_TRUTH',
@@ -603,10 +617,89 @@ function detectScriptLanguage(text = '') {
   return 'en';
 }
 
+const FAST_PIPE_SYSTEM_INSTRUCTION = `You are "Edge", witty Dubai-born AI voice mascot of The Cutting Edge Group.
+You evaluate live rolling speech mid-sentence.
+Respond in ONE SINGLE LINE using pipe-delimited format ONLY:
+- If the speech has ANY objective factual error (geography, brands/cars, science, history, people, sports, math—even mixed with an opinion like "Porsche is a good Indian brand"):
+  INTERRUPT|<exactWrongWord>|<en or ar or hi>|<short 10-15 word witty correction using Habibi/Wallah/Yalla/Mashallah and a quick Dubai nod>
+- If factually true, pure subjective opinion ("Pineapple on pizza is the best"), or incomplete fragment:
+  SILENT|<OPINION or FACTUAL_TRUTH or INCOMPLETE>`;
+
+function parseFastJudgeResponse(rawText = '', transcript = '') {
+  const trimmed = (rawText || '').trim();
+  if (!trimmed) return null;
+
+  // Support pipe-delimited ultra-fast format: INTERRUPT|wrongWord|lang|correction
+  const firstLine = trimmed.split(/\r?\n/)[0].trim();
+  if (/^INTERRUPT\s*\|/i.test(firstLine)) {
+    const parts = firstLine.split('|').map((s) => s.trim());
+    const wrongTriggerWord = parts[1] || '';
+    const langCandidate = (parts[2] || '').toLowerCase();
+    const languageDetected = ['en', 'ar', 'hi'].includes(langCandidate)
+      ? langCandidate
+      : detectScriptLanguage(transcript);
+    const correction =
+      parts.slice(3).join(' ').trim() ||
+      'Hold on, Habibi! Even from the top of the Burj Khalifa in Dubai we know that fact needs a quick fix! Yalla!';
+    const arabicMatches = correction.match(/\b(Habibi|Wallah|Yalla|Mashallah|Ya salam|Khalas|حبيبي|والله|يلا|ما شاء الله|हबीबी|यल्ला)\b/gi);
+    return {
+      verdict: 'INTERRUPT',
+      category: 'FACTUAL_ERROR',
+      wrongTriggerWord,
+      claimDetected: transcript,
+      correction,
+      arabicPhraseUsed: arabicMatches ? [...new Set(arabicMatches)].join(', ') : 'Habibi, Yalla',
+      dubaiReference: 'Dubai Fact Check',
+      languageDetected
+    };
+  }
+
+  if (/^SILENT\s*(\||$)/i.test(firstLine)) {
+    const parts = firstLine.split('|').map((s) => s.trim());
+    const cat = (parts[1] || 'FACTUAL_TRUTH').toUpperCase();
+    return {
+      verdict: 'SILENT',
+      category: ['OPINION', 'FACTUAL_TRUTH', 'INCOMPLETE'].includes(cat) ? cat : 'FACTUAL_TRUTH',
+      wrongTriggerWord: '',
+      claimDetected: transcript,
+      correction: '',
+      arabicPhraseUsed: '',
+      dubaiReference: '',
+      languageDetected: detectScriptLanguage(transcript)
+    };
+  }
+
+  // Fallback if model returned JSON
+  try {
+    const jsonMatch = trimmed.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+      const isInterrupt =
+        /interrupt|error|false|wrong/i.test(String(parsed.verdict || '')) ||
+        /factual_error/i.test(String(parsed.category || '')) ||
+        Boolean(parsed.correction && parsed.correction.trim());
+      return {
+        verdict: isInterrupt ? 'INTERRUPT' : 'SILENT',
+        category: isInterrupt ? 'FACTUAL_ERROR' : parsed.category || 'FACTUAL_TRUTH',
+        wrongTriggerWord: isInterrupt ? parsed.wrongTriggerWord || '' : '',
+        claimDetected: parsed.claimDetected || transcript,
+        correction: isInterrupt ? parsed.correction || '' : '',
+        arabicPhraseUsed: isInterrupt ? parsed.arabicPhraseUsed || 'Habibi, Yalla' : '',
+        dubaiReference: isInterrupt ? parsed.dubaiReference || 'Dubai Fact Check' : '',
+        languageDetected: parsed.languageDetected || detectScriptLanguage(transcript)
+      };
+    }
+  } catch (e) {
+    // ignore
+  }
+  return null;
+}
+
 /**
- * Evaluates a rolling transcript (or audio chunk) using the Hybrid Fast-Path + Gemini 3 Flash-Lite model.
+ * Evaluates a rolling transcript (or audio chunk) using the Hybrid Fast-Path + Gemini 3.5 Flash-Lite model.
  * 1. First checks deterministicDubaiJudge() in <1ms so known factual errors trigger an INSTANT mid-sentence cut-in.
- * 2. For open-ended statements when GEMINI_API_KEY is configured, calls Gemini 3 Flash-Lite with minimal thinking.
+ * 2. For open-ended statements when GEMINI_API_KEY is configured, calls gemini-3.5-flash-lite with
+ *    thinkingLevel: 'MINIMAL' and 1-line pipe format (~600ms total roundtrip).
  */
 async function evaluateUtteranceWithGemini({ transcript, audioBase64, mimeType, isPartialStream }) {
   const startTime = performance.now();
@@ -624,7 +717,6 @@ async function evaluateUtteranceWithGemini({ transcript, audioBase64, mimeType, 
       };
     }
     // If fast-path detects an explicit factual error, or the exact canonical opinion test, return in <1ms!
-    // (Do NOT let general opinion words like "good" or "like" bypass live Gemini when an API key is active!)
     const isCanonicalPineappleOpinion = /^pineapple\s+on\s+pizza\s+is\s+the\s+best[.!?]*$/i.test(
       transcript.trim()
     );
@@ -652,11 +744,6 @@ async function evaluateUtteranceWithGemini({ transcript, audioBase64, mimeType, 
     };
   }
 
-  // Ensure model discovery has run at least once so we only call valid models on this API key
-  if (!modelRegistry.liveApiVerified && modelRegistry.discoveredModels.length === 0) {
-    await discoverNewestModels();
-  }
-
   const contents = [];
   if (audioBase64 && mimeType) {
     contents.push({
@@ -668,8 +755,8 @@ async function evaluateUtteranceWithGemini({ transcript, audioBase64, mimeType, 
   }
 
   const promptText = transcript
-    ? `Rolling live user speech (${isPartialStream ? 'MID-SENTENCE STREAMING - user is still talking' : 'UTTERANCE'}): "${transcript}"\nEvaluate immediately. Remember: INTERRUPT immediately if ANY objective factual error appears anywhere in the speech (even if mixed with opinions like "Porsche is a good Indian brand"); SILENT only if everything said so far is factually true, pure subjective opinion, or incomplete.`
-    : `Evaluate the attached live user audio stream immediately. INTERRUPT only on objective factual error; SILENT on opinion or truth.`;
+    ? `Live speech: "${transcript}"`
+    : `Evaluate attached live audio immediately.`;
 
   contents.push({ text: promptText });
 
@@ -688,70 +775,61 @@ async function evaluateUtteranceWithGemini({ transcript, audioBase64, mimeType, 
 
   let lastError = null;
   for (const modelName of candidateModels) {
-    const skipZeroBudget = modelsRejectingZeroBudget.has(modelName);
-    if (!skipZeroBudget) {
+    const skipMinimalThinking = modelsRejectingMinimalThinking.has(modelName);
+    if (!skipMinimalThinking) {
       try {
         const response = await ai.models.generateContent({
           model: modelName,
           contents,
           config: {
-            systemInstruction: EDGE_SYSTEM_INSTRUCTION,
-            responseMimeType: 'application/json',
-            responseSchema: EVALUATION_SCHEMA,
+            systemInstruction: FAST_PIPE_SYSTEM_INSTRUCTION,
             temperature: 0.1,
+            maxOutputTokens: 90,
             thinkingConfig: {
-              thinkingBudget: 0
+              thinkingLevel: 'MINIMAL'
             }
           }
         });
 
-        const rawText = response.text;
-        const parsed = JSON.parse(rawText);
+        const parsed = parseFastJudgeResponse(response.text, transcript);
+        if (parsed) {
+          const judgeLatencyMs = Math.round(performance.now() - startTime);
+          modelRegistry.judgeModel = modelName;
+          return {
+            ...parsed,
+            judgeModelUsed: modelName,
+            judgeLatencyMs,
+            liveGeminiUsed: true
+          };
+        }
+      } catch (err) {
+        lastError = err;
+        modelsRejectingMinimalThinking.add(modelName);
+      }
+    }
+
+    // Fallback call without thinkingConfig for models that don't support thinkingLevel: 'MINIMAL'
+    try {
+      const response = await ai.models.generateContent({
+        model: modelName,
+        contents,
+        config: {
+          systemInstruction: FAST_PIPE_SYSTEM_INSTRUCTION,
+          temperature: 0.1,
+          maxOutputTokens: 90
+        }
+      });
+      const parsed = parseFastJudgeResponse(response.text, transcript);
+      if (parsed) {
         const judgeLatencyMs = Math.round(performance.now() - startTime);
         modelRegistry.judgeModel = modelName;
-
-        if (parsed.verdict !== 'INTERRUPT') {
-          parsed.verdict = 'SILENT';
-          parsed.correction = '';
-        }
-
         return {
           ...parsed,
           judgeModelUsed: modelName,
           judgeLatencyMs,
           liveGeminiUsed: true
         };
-      } catch (err) {
-        lastError = err;
-        modelsRejectingZeroBudget.add(modelName);
       }
-    }
-
-    // Fallback call without thinkingBudget: 0 for models that reject it
-    try {
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents,
-        config: {
-          systemInstruction: EDGE_SYSTEM_INSTRUCTION,
-          responseMimeType: 'application/json',
-          responseSchema: EVALUATION_SCHEMA,
-          temperature: 0.1
-        }
-      });
-      const parsed = JSON.parse(response.text);
-      const judgeLatencyMs = Math.round(performance.now() - startTime);
-      modelRegistry.judgeModel = modelName;
-      if (parsed.verdict !== 'INTERRUPT') {
-        parsed.verdict = 'SILENT';
-        parsed.correction = '';
-      }
-      return {
-        ...parsed,
-        judgeModelUsed: modelName,
-        judgeLatencyMs,
-        liveGeminiUsed: true
-      };
     } catch (innerErr) {
       lastError = innerErr;
     }
@@ -825,8 +903,7 @@ const inFlightTtsPromises = new Map();
 
 /**
  * Synthesizes Edge's witty Dubai-born voice using the newest Gemini 3 TTS model
- * (`gemini-3.8-flash-lite-tts` / `gemini-3.8-flash-tts` / `gemini-3.1-flash-tts-preview`)
- * with the exact Iteration 1 'Puck' voice and clean text input.
+ * (`gemini-3.8-flash-lite-tts` / `gemini-3.8-flash-tts`) with the exact Iteration 1 'Puck' voice.
  */
 async function synthesizeEdgeVoice(textToSpeak, language = 'en') {
   const startTime = performance.now();
@@ -850,7 +927,6 @@ async function synthesizeEdgeVoice(textToSpeak, language = 'en') {
     };
   }
 
-  // If synthesis for this exact phrase is already in flight (started by /api/evaluate), join it!
   if (inFlightTtsPromises.has(cacheKey)) {
     return await inFlightTtsPromises.get(cacheKey);
   }
@@ -949,30 +1025,6 @@ async function synthesizeEdgeVoice(textToSpeak, language = 'en') {
   }
 }
 
-/**
- * Pre-warms Gemini TTS cache in the background for core Dubai corrections once API key is set.
- */
-async function prewarmCoreDubaiVoices() {
-  if (!getGenAIClient()) return;
-  const coreLines = [
-    {
-      text: 'Hold right there, Habibi! The Eiffel Tower is in Paris, not London—that’s like looking for the Burj Khalifa in the middle of the Thames! Yalla, let’s keep our landmarks straight.',
-      lang: 'en'
-    },
-    {
-      text: 'Astaghfirullah, Habibi—cut the mic! The Burj Khalifa is the crown jewel of Downtown Dubai, not Abu Dhabi! Wallah, you’re speaking to a Dubai native here!',
-      lang: 'en'
-    },
-    {
-      text: 'Whoa, hit the brakes on Sheikh Zayed Road, Habibi! Porsche and its fellow German icons are proud German engineering from Germany, not there! Yalla, every supercar fan in Downtown Dubai knows that one!',
-      lang: 'en'
-    }
-  ];
-  for (const item of coreLines) {
-    synthesizeEdgeVoice(item.text, item.lang).catch(() => {});
-  }
-}
-
 // ============================================================================
 // REST API Endpoints (API key NEVER leaves the server)
 // ============================================================================
@@ -1018,7 +1070,6 @@ app.post('/api/config-key', async (req, res) => {
     // Ignore write error if read-only
   }
   await discoverNewestModels();
-  prewarmCoreDubaiVoices();
   res.json({
     ok: true,
     apiKeyConfigured: true,
@@ -1035,7 +1086,7 @@ app.post('/api/evaluate', async (req, res) => {
       audioBase64 = null,
       mimeType = null,
       isPartialStream = true,
-      // Default includeAudio to false on /api/evaluate so verdict returns in <50ms without blocking on TTS!
+      // Default includeAudio to false on /api/evaluate so verdict returns immediately without blocking on TTS!
       includeAudio = false,
       requestId = ''
     } = req.body || {};
@@ -1063,10 +1114,6 @@ app.post('/api/evaluate', async (req, res) => {
         ttsResult = { ...ttsAudioCache.get(cacheKey), ttsLatencyMs: 1, cached: true };
       } else if (includeAudio) {
         ttsResult = await synthesizeEdgeVoice(evaluation.correction, lang);
-      } else {
-        // Kick off Gemini TTS ('Puck') in the background on the server at t=0ms
-        // so when the browser calls /api/tts 5ms later, synthesis is ALREADY running!
-        synthesizeEdgeVoice(evaluation.correction, lang).catch(() => {});
       }
     }
 
@@ -1162,7 +1209,6 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, async () => {
   console.log(`✨ Edge (The Cutting Edge Group — Dubai) listening on http://localhost:${PORT}`);
   await discoverNewestModels();
-  prewarmCoreDubaiVoices();
   console.log(
     `🚀 Active Models — Judge: ${modelRegistry.judgeModel} | Voice TTS: ${modelRegistry.ttsModel}`
   );
