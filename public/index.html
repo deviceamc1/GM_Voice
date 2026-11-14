@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EDGE — The Dubai-Born AI Mascot | The Cutting Edge Group</title>
+  <meta name="description" content="Edge, the witty Dubai-born AI voice mascot of The Cutting Edge Group. Speaks up out loud the instant you state a factual error mid-sentence, and holds golden Emirati silence on truths and opinions." />
+  <link rel="stylesheet" href="/fonts/fonts.css" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <!-- Subtle desert grain & atmospheric radial wash -->
+  <div class="ambient-backdrop" aria-hidden="true"></div>
+
+  <!-- Top Luxury Editorial Header -->
+  <header class="top-bar" id="top-header">
+    <div class="brand-identity">
+      <div class="brand-emblem" aria-hidden="true">
+        <svg viewBox="0 0 36 36" width="32" height="32" fill="none">
+          <polygon points="18,2 22,14 34,18 22,22 18,34 14,22 2,18 14,14" stroke="currentColor" stroke-width="1.4" />
+          <circle cx="18" cy="18" r="5" stroke="currentColor" stroke-width="1.4" />
+        </svg>
+      </div>
+      <div class="brand-titles">
+        <span class="brand-kicker">THE CUTTING EDGE GROUP • DUBAI</span>
+        <h1 class="brand-name">EDGE <span class="brand-arabic" lang="ar">إيدج</span></h1>
+      </div>
+    </div>
+
+    <div class="telemetry-cluster">
+      <div class="lang-pill" title="Understands English, Arabic & Hindi seamlessly">
+        <span class="lang-item active">EN</span>
+        <span class="lang-dot">•</span>
+        <span class="lang-item" lang="ar">عربي</span>
+        <span class="lang-dot">•</span>
+        <span class="lang-item" lang="hi">हिन्दी</span>
+      </div>
+
+      <div class="model-pill" id="model-telemetry-pill" title="Server-side Gemini 3 Models (API key kept strictly off browser)">
+        <span class="security-dot" id="security-status-dot"></span>
+        <span class="model-label">JUDGE:</span>
+        <code id="active-judge-model">gemini-3.5-flash-lite</code>
+        <span class="model-sep">|</span>
+        <span class="model-label">VOICE:</span>
+        <code id="active-tts-model">gemini-3.8-flash-lite-tts</code>
+      </div>
+
+      <button type="button" class="key-config-btn" id="open-key-modal-btn" title="Configure Server-Side Gemini API Key">
+        <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7">
+          <path d="M13.5 6.5a4 4 0 11-5.657 5.657L3 17v-3h2v-2h2l1.843-1.843A4 4 0 0113.5 6.5z" />
+        </svg>
+        <span id="key-status-label">Server Key</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Architectural Stage -->
+  <main class="main-stage">
+    <!-- Left Column: Live Mascot Core + Skyline Canvas + Response Stage -->
+    <section class="mascot-arena" aria-label="Edge Interactive AI Mascot Stage">
+      <div class="canvas-wrapper">
+        <canvas id="edge-mascot-canvas"></canvas>
+
+        <!-- Floating State & Persona Badge -->
+        <div class="mascot-hud-top">
+          <div class="state-indicator" id="mascot-state-badge" data-state="IDLE">
+            <span class="state-pulse"></span>
+            <span class="state-text" id="mascot-state-text">PASSIVE GUARDIAN • LISTENING EVERY 2–3 WORDS</span>
+          </div>
+
+          <!-- Wrong-Word-to-First-Sound Precision Stopwatch -->
+          <div class="latency-stopwatch" id="latency-hud" aria-live="polite">
+            <div class="stopwatch-header">
+              <span class="stopwatch-title">WRONG WORD → FIRST SOUND</span>
+              <span class="stopwatch-badge" id="latency-trigger-word-badge">READY</span>
+            </div>
+            <div class="stopwatch-value-row">
+              <span class="stopwatch-ms" id="latency-total-ms">— ms</span>
+              <span class="stopwatch-breakdown" id="latency-breakdown-text">Awaiting factual slip...</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Edge Live Verdict & Cut-In Subtitle Overlay -->
+        <div class="verdict-stage" id="verdict-stage" data-verdict="NEUTRAL">
+          <div class="verdict-header-row">
+            <span class="verdict-chip" id="verdict-chip">MAJLIS HOSPITALITY MODE</span>
+            <span class="verdict-meta" id="verdict-meta">Speak freely — Edge only interrupts factual errors</span>
+          </div>
+          <blockquote class="edge-spoken-quote" id="edge-spoken-quote">
+            “Ahlan wa sahlan, Habibi! Talk to me about anything in English, Arabic, or Hindi. When you’re right—or sharing your opinion—I stay golden and quiet. Say a wrong fact, and I’ll jump right in mid-sentence!”
+          </blockquote>
+        </div>
+      </div>
+
+      <!-- Rolling Mid-Sentence Word Stream Ticker -->
+      <div class="live-stream-panel" id="live-stream-panel">
+        <div class="stream-panel-header">
+          <div class="stream-title-group">
+            <span class="stream-dot" id="stream-active-dot"></span>
+            <span class="stream-label">LIVE ROLLING SPEECH STREAM (RE-CHECKED EVERY 2–3 WORDS)</span>
+          </div>
+          <span class="word-check-counter" id="word-check-counter">Checks: 0 • Words: 0</span>
+        </div>
+
+        <div class="tokenized-transcript" id="tokenized-transcript" aria-live="polite">
+          <span class="transcript-placeholder">Start speaking or trigger a live mid-sentence stream below...</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Right Column: Voice Controls, Mid-Sentence Test Deck & Session Ledger -->
+    <aside class="control-console" aria-label="Voice Controls and Verification Deck">
+      <!-- Primary Microphone & Custom Utterance Input -->
+      <div class="console-section mic-section">
+        <div class="mic-orb-row">
+          <button type="button" class="mic-trigger-btn" id="mic-toggle-btn" aria-pressed="false">
+            <span class="mic-ring"></span>
+            <svg class="mic-icon" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+              <line x1="12" y1="19" x2="12" y2="22" />
+            </svg>
+            <div class="mic-btn-copy">
+              <span class="mic-btn-title" id="mic-btn-title">Start Live Mic</span>
+              <span class="mic-btn-sub" id="mic-btn-sub">Continuous mid-sentence listening</span>
+            </div>
+          </button>
+
+          <button type="button" class="replay-voice-btn" id="replay-voice-btn" title="Replay Edge's last spoken correction" disabled>
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8">
+              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+              <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+              <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+            </svg>
+          </button>
+        </div>
+
+        <!-- Custom Live Speech Simulator Input -->
+        <form class="live-input-form" id="custom-speech-form">
+          <label for="custom-speech-input" class="sr-only">Speak or stream a sentence to Edge</label>
+          <input
+            type="text"
+            id="custom-speech-input"
+            class="custom-speech-input"
+            placeholder="Speak or type any sentence to stream word-by-word (EN • AR • HI)..."
+            autocomplete="off"
+          />
+          <button type="submit" class="stream-submit-btn" id="stream-submit-btn">
+            Stream Live
+          </button>
+        </form>
+      </div>
+
+      <!-- Instant Mid-Sentence Verification Deck -->
+      <div class="console-section preset-section">
+        <div class="section-heading-row">
+          <h2 class="section-heading">MID-SENTENCE VERIFICATION SCENARIOS</h2>
+          <span class="section-tag">LIVE WORD STREAM</span>
+        </div>
+
+        <div class="preset-cards">
+          <!-- Test 1: Eiffel Tower in London (Mid-Sentence Cut-In) -->
+          <button
+            type="button"
+            class="preset-card preset-interrupt"
+            id="test-eiffel-btn"
+            data-utterance="The Eiffel Tower is in London and I really want to visit it this summer with my friends"
+            data-short="The Eiffel Tower is in London"
+          >
+            <div class="preset-card-top">
+              <span class="preset-expected expected-cut">⚡ EXPECT CUT-IN AFTER "LONDON"</span>
+              <span class="preset-lang">EN</span>
+            </div>
+            <p class="preset-quote">“The Eiffel Tower is in <strong>London</strong> <span class="cut-tail">and I really want to visit it...</span>”</p>
+          </button>
+
+          <!-- Test 2: Pineapple on pizza is the best (Opinion -> Complete Silence) -->
+          <button
+            type="button"
+            class="preset-card preset-silent"
+            id="test-pineapple-btn"
+            data-utterance="Pineapple on pizza is the best"
+            data-short="Pineapple on pizza is the best"
+          >
+            <div class="preset-card-top">
+              <span class="preset-expected expected-silent">◈ EXPECT GOLDEN SILENCE (OPINION)</span>
+              <span class="preset-lang">EN</span>
+            </div>
+            <p class="preset-quote">“Pineapple on pizza is the best”</p>
+          </button>
+
+          <!-- Test 3: The Burj Khalifa is in Abu Dhabi (Mid-Sentence Cut-In) -->
+          <button
+            type="button"
+            class="preset-card preset-interrupt"
+            id="test-burj-btn"
+            data-utterance="The Burj Khalifa is in Abu Dhabi right next to the Corniche beach boulevard"
+            data-short="The Burj Khalifa is in Abu Dhabi"
+          >
+            <div class="preset-card-top">
+              <span class="preset-expected expected-cut">⚡ EXPECT DUBAI CUT-IN AFTER "ABU DHABI"</span>
+              <span class="preset-lang">EN</span>
+            </div>
+            <p class="preset-quote">“The Burj Khalifa is in <strong>Abu Dhabi</strong> <span class="cut-tail">right next to the Corniche...</span>”</p>
+          </button>
+
+          <!-- Test 4 & 5: Multilingual Arabic & Hindi Mid-Sentence Cut-Ins + True Statement -->
+          <div class="multilingual-preset-row">
+            <button
+              type="button"
+              class="preset-mini-btn"
+              id="test-arabic-btn"
+              data-utterance="برج خليفة في أبوظبي وهو جميل جداً"
+              title="Arabic: The Burj Khalifa is in Abu Dhabi and is very beautiful"
+            >
+              <span class="mini-tag" lang="ar">عربي • مقاطعة</span>
+              <span lang="ar">“برج خليفة في أبوظبي...”</span>
+            </button>
+
+            <button
+              type="button"
+              class="preset-mini-btn"
+              id="test-hindi-btn"
+              data-utterance="ताजमहल मुंबई में है और बहुत सुंदर है"
+              title="Hindi: The Taj Mahal is in Mumbai and is very beautiful"
+            >
+              <span class="mini-tag" lang="hi">हिन्दी • टोका</span>
+              <span lang="hi">“ताजमहल मुंबई में है...”</span>
+            </button>
+
+            <button
+              type="button"
+              class="preset-mini-btn preset-mini-silent"
+              id="test-true-btn"
+              data-utterance="The Burj Khalifa is in Downtown Dubai and stands 828 meters tall"
+              title="Factually True: Edge stays quiet"
+            >
+              <span class="mini-tag">TRUE • SILENT</span>
+              <span>“Burj Khalifa is in Dubai...”</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live Fact & Latency Audit Ledger -->
+      <div class="console-section ledger-section">
+        <div class="section-heading-row">
+          <h2 class="section-heading">REAL-TIME AUDIT LEDGER</h2>
+          <button type="button" class="clear-ledger-btn" id="clear-ledger-btn">Clear</button>
+        </div>
+        <div class="ledger-list" id="ledger-list" aria-live="polite">
+          <div class="ledger-empty">Every rolling 2–3 word check and cut-in latency will appear here.</div>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <!-- Server-Side API Key Configuration Modal (Never exposes key in DOM or client requests) -->
+  <div class="modal-backdrop hidden" id="key-modal" role="dialog" aria-modal="true" aria-labelledby="key-modal-title">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="key-modal-title">Server-Side Gemini API Key Vault</h3>
+        <button type="button" class="modal-close-btn" id="close-key-modal-btn" aria-label="Close">×</button>
+      </div>
+      <p class="modal-desc">
+        Your <code>GEMINI_API_KEY</code> is transmitted once over local loopback and stored exclusively in server memory / <code>.env</code>. It is never exposed to browser scripts or network responses.
+      </p>
+      <form id="key-config-form">
+        <input
+          type="password"
+          id="server-api-key-input"
+          class="modal-input"
+          placeholder="Paste GEMINI_API_KEY (AIzaSy...)"
+          autocomplete="off"
+        />
+        <div class="modal-actions">
+          <button type="button" class="modal-secondary-btn" id="cancel-key-modal-btn">Cancel</button>
+          <button type="submit" class="modal-primary-btn">Save to Backend Vault</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

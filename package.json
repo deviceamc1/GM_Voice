@@ -1,0 +1,21 @@
+{
+  "name": "edge-dubai-mascot",
+  "version": "1.0.0",
+  "description": "Edge — The Dubai-born witty AI voice mascot of The Cutting Edge Group",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node test.js"
+  },
+  "dependencies": {
+    "@google/genai": "^1.0.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.65.1"
+  }
+}
