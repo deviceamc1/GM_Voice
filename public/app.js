@@ -393,7 +393,8 @@ function escapeHtml(str = '') {
 
 /**
  * Evaluates the current rolling word buffer against /api/evaluate.
- * Called every 2–3 words while the user is STILL speaking!
+ * Called on EVERY new word (once >=3 words are spoken) while the user is STILL speaking!
+ * Notice includeAudio is false so the Judge verdict returns in <50ms without waiting for TTS audio synthesis.
  */
 async function evaluateRollingWindow({ sessionId, isFinalSentence = false, remainingWords = [] }) {
   if (sessionId !== streamSessionId || isInterruptedCurrentStream) return null;
@@ -411,7 +412,7 @@ async function evaluateRollingWindow({ sessionId, isFinalSentence = false, remai
       body: JSON.stringify({
         transcript: spokenTextSoFar,
         isPartialStream: !isFinalSentence,
-        includeAudio: true,
+        includeAudio: false,
         requestId: `${sessionId}-${rollingCheckCount}`
       })
     });
@@ -445,12 +446,12 @@ async function evaluateRollingWindow({ sessionId, isFinalSentence = false, remai
       const wrongWordTime = findWrongWordTimestamp(result.wrongTriggerWord);
       const firstSoundTime = await playEdgeCutInVoice({
         correction: result.correction,
-        audioBase64: result.audioBase64,
+        audioBase64: result.audioBase64 || null,
         language: result.languageDetected || 'en'
       });
 
       const wrongWordToFirstSoundMs = Math.max(
-        12,
+        8,
         Math.round(firstSoundTime - wrongWordTime)
       );
 
@@ -481,8 +482,8 @@ async function evaluateRollingWindow({ sessionId, isFinalSentence = false, remai
 
 /**
  * Streams an utterance word-by-word at realistic live speaking cadence,
- * triggering a non-blocking Gemini 3 Flash-Lite check every 2–3 words WITHOUT waiting for a pause,
- * so Edge cuts the speaker off mid-sentence the moment a wrong fact word appears!
+ * triggering a non-blocking check on EVERY word after word 3 WITHOUT waiting for a pause,
+ * so Edge cuts the speaker off mid-sentence the exact millisecond a wrong fact word appears!
  */
 export async function streamUtteranceMidSentence(fullSentence) {
   const words = fullSentence.trim().split(/\s+/).filter(Boolean);
@@ -504,10 +505,10 @@ export async function streamUtteranceMidSentence(fullSentence) {
   streamActiveDot.classList.add('active');
   mascot.setState('LISTENING');
   mascot.setSimulatedEnergy(0.32);
-  updateMascotStateUI('LISTENING', 'USER SPEAKING • RE-CHECKING EVERY 2–3 WORDS');
+  updateMascotStateUI('LISTENING', 'USER SPEAKING • RE-CHECKING EVERY WORD MID-SENTENCE');
 
   let index = 0;
-  const WORD_CADENCE_MS = 145; // Natural brisk speaking cadence (~410 WPM burst)
+  const WORD_CADENCE_MS = 160; // Natural speaking cadence so mid-sentence cut-off is unmistakable
 
   return new Promise((resolve) => {
     activeStreamTimer = setInterval(async () => {
@@ -520,15 +521,10 @@ export async function streamUtteranceMidSentence(fullSentence) {
 
       if (index < words.length) {
         const word = words[index];
-        const prevWord = index > 0 ? words[index - 1].toLowerCase().replace(/[.,!?]/g, '') : '';
         index += 1;
         const isLastWord = index === words.length;
-        const multiWordPrefixes = new Set(['abu', 'new', 'los', 'san', 'las', 'mount', 'أبو', 'ابو']);
-        // Re-check every 2 words (once at least 4 words have been spoken), immediately after a multi-word prefix, or on the final word
-        const shouldCheckpoint =
-          (index >= 4 && index % 2 === 0) ||
-          (index >= 4 && multiWordPrefixes.has(prevWord)) ||
-          isLastWord;
+        // Re-check on EVERY word once at least 3 words are spoken!
+        const shouldCheckpoint = index >= 3 || isLastWord;
 
         wordRegistry.push({
           word,
@@ -564,7 +560,7 @@ export async function streamUtteranceMidSentence(fullSentence) {
 
 /**
  * Real-Time Browser Microphone Streaming (Web Speech API interimResults + Web Audio Analyser)
- * Re-checks rolling speech every 2–3 new words while the user is still speaking!
+ * Re-checks rolling speech on EVERY new word while the user is still speaking!
  */
 async function toggleLiveMicrophone() {
   if (isMicListening) {
@@ -596,21 +592,22 @@ async function toggleLiveMicrophone() {
   isMicListening = true;
   micToggleBtn.setAttribute('aria-pressed', 'true');
   micBtnTitle.textContent = 'Listening Live (Click to Stop)';
-  micBtnSub.textContent = 'Edge checks every 2–3 words mid-sentence';
+  micBtnSub.textContent = 'Edge checks every word mid-sentence';
   streamActiveDot.classList.add('active');
   mascot.setState('LISTENING');
-  updateMascotStateUI('LISTENING', 'LIVE MIC ACTIVE • RE-CHECKING EVERY 2–3 WORDS');
+  updateMascotStateUI('LISTENING', 'LIVE MIC ACTIVE • RE-CHECKING EVERY WORD MID-SENTENCE');
 
   streamSessionId += 1;
   const currentSession = streamSessionId;
   wordRegistry = [];
   rollingCheckCount = 0;
   isInterruptedCurrentStream = false;
-  let lastCheckedWordCount = 0;
+  let lastCheckedTranscript = '';
 
   speechRecognition = new SpeechRecognitionClass();
   speechRecognition.continuous = true;
   speechRecognition.interimResults = true;
+  speechRecognition.maxAlternatives = 1;
   speechRecognition.lang = 'en-US';
 
   speechRecognition.onresult = (event) => {
@@ -618,12 +615,15 @@ async function toggleLiveMicrophone() {
 
     let combinedTranscript = '';
     let hasFinal = false;
-    for (let i = event.resultIndex; i < event.results.length; i++) {
+    for (let i = 0; i < event.results.length; i++) {
       combinedTranscript += event.results[i][0].transcript + ' ';
-      if (event.results[i].isFinal) hasFinal = true;
+      if (event.results[i].isFinal && i === event.results.length - 1) {
+        hasFinal = true;
+      }
     }
 
-    const spokenWords = combinedTranscript.trim().split(/\s+/).filter(Boolean);
+    const cleanTranscript = combinedTranscript.trim();
+    const spokenWords = cleanTranscript.split(/\s+/).filter(Boolean);
     if (spokenWords.length === 0) return;
 
     // Stamp new words with exact performance.now() arrival time
@@ -636,17 +636,16 @@ async function toggleLiveMicrophone() {
       return {
         word: w,
         timestamp: now,
-        isCheckpoint: idx >= 3 && (idx + 1 - lastCheckedWordCount >= 2 || hasFinal)
+        isCheckpoint: idx >= 2
       };
     });
 
     wordRegistry = updatedRegistry;
     renderTokenizedStream();
 
-    const newWordsAdded = wordRegistry.length - lastCheckedWordCount;
-    // Re-evaluate every 2–3 new words immediately while user is still speaking!
-    if ((wordRegistry.length >= 4 && newWordsAdded >= 2) || hasFinal) {
-      lastCheckedWordCount = wordRegistry.length;
+    // Trigger evaluation immediately on EVERY new word once >= 3 words have been spoken!
+    if ((wordRegistry.length >= 3 && cleanTranscript !== lastCheckedTranscript) || hasFinal) {
+      lastCheckedTranscript = cleanTranscript;
       evaluateRollingWindow({
         sessionId: currentSession,
         isFinalSentence: hasFinal,
